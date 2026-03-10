@@ -1,0 +1,507 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless Pixel Canvas (r/place clone)
+  Complete event-driven architecture with WebSockets, Auth, and Discord integrations.
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: python3.12
+    MemorySize: 256
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+
+Resources:
+  # ==========================================
+  # 1. FRONTEND HOSTING & STORAGE (S3)
+  # ==========================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+            Action: "s3:GetObject"
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "OAI for Pixel Canvas Frontend"
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: FrontendBucketPolicy
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: FrontendBucketOrigin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponsePagePath: /index.html # SPA routing fallback
+            ResponseCode: 200
+          - ErrorCode: 403
+            ResponsePagePath: /index.html # SPA routing fallback
+            ResponseCode: 200
+
+  SnapshotsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-snapshots-${AWS::AccountId}"
+
+  # ==========================================
+  # 2. DATABASES (DynamoDB)
+  # ==========================================
+  CanvasPixelsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: canvas-pixels
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ChunkId
+          AttributeType: S
+        - AttributeName: PixelId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ChunkId
+          KeyType: HASH
+        - AttributeName: PixelId
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES # Mandatory for the Broadcast Worker
+
+  WebSocketConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: websocket-connections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ConnectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ConnectionId
+          KeyType: HASH
+
+  RateLimitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: rate-limits
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: UserId
+          AttributeType: S
+        - AttributeName: TimeWindow
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserId
+          KeyType: HASH
+        - AttributeName: TimeWindow
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ExpirationTime
+        Enabled: true
+
+  # ==========================================
+  # 3. MESSAGING PIPELINE (SNS & SQS)
+  # ==========================================
+  PixelEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: pixel-events-topic
+
+  PixelWorkerDLQ:
+    Type: AWS::SQS::Queue
+
+  PixelWorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PixelWorkerDLQ.Arn
+        maxReceiveCount: 3
+
+  PixelWorkerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref PixelWorkerQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: "sns.amazonaws.com" }
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt PixelWorkerQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref PixelEventsTopic }
+
+  PixelWorkerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref PixelEventsTopic
+      Endpoint: !GetAtt PixelWorkerQueue.Arn
+
+  SnapshotWorkerQueue:
+    Type: AWS::SQS::Queue
+
+  SnapshotWorkerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref PixelEventsTopic
+      Endpoint: !GetAtt SnapshotWorkerQueue.Arn
+
+  # ==========================================
+  # 4. REST API & CUSTOM AUTHORIZER
+  # ==========================================
+  CanvasRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CanvasJwtAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CanvasJwtAuthorizer:
+            FunctionArn: !GetAtt ApiGatewayAuthorizerFunction.Arn
+            Identity:
+              Header: Authorization
+
+  ApiGatewayAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/authorizer/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          APP_SECRET_NAME: "AppSecrets"
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:AppSecrets-*"
+
+  # ==========================================
+  # 5. WEBSOCKET API
+  # ==========================================
+  PixelWebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: PixelCanvasWebSockets
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  PixelWebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref PixelWebSocketApi
+      StageName: production
+      AutoDeploy: true
+
+  WebSocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref PixelWebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketManagerFunction.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PixelWebSocketApi
+      RouteKey: $connect
+      Target: !Join [ "/", [ "integrations", !Ref WebSocketIntegration ] ]
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PixelWebSocketApi
+      RouteKey: $disconnect
+      Target: !Join [ "/", [ "integrations", !Ref WebSocketIntegration ] ]
+
+  WebSocketManagerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebSocketManagerFunction
+      Principal: apigateway.amazonaws.com
+
+  # ==========================================
+  # 6. COMPUTE (Lambdas)
+  # ==========================================
+
+  # --- Write Pipeline ---
+  WebProxyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/web_proxy/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref PixelEventsTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt PixelEventsTopic.TopicName
+      Events:
+        DrawPixelApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CanvasRestApi
+            Path: /pixels
+            Method: post
+
+  PixelWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/pixel_worker/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+          RATE_LIMIT_TABLE_NAME: !Ref RateLimitsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CanvasPixelsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RateLimitsTable
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PixelWorkerQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 1
+
+  DlqProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/dlq_processor/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          PIXEL_WORKER_QUEUE_URL: !Ref PixelWorkerQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt PixelWorkerQueue.QueueName
+      Events:
+        SQSDlqEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PixelWorkerDLQ.Arn
+            BatchSize: 10
+
+  # --- Real-Time Read Pipeline ---
+  BroadcastWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/broadcast_worker/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE_NAME: !Ref WebSocketConnectionsTable
+          WSS_API_ENDPOINT: !Sub "https://${PixelWebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebSocketConnectionsTable
+        - Statement:
+            - Effect: Allow
+              Action: [ "execute-api:ManageConnections" ]
+              Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PixelWebSocketApi}/production/*"
+      Events:
+        StreamEvent:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt CanvasPixelsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 100
+
+  WebSocketManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/websocket_manager/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE_NAME: !Ref WebSocketConnectionsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebSocketConnectionsTable
+
+  CanvasReaderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/canvas_reader/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref CanvasPixelsTable
+      Events:
+        GetCanvasApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CanvasRestApi
+            Path: /canvas
+            Method: get
+            Auth:
+              Authorizer: NONE
+
+  # --- Auth & Discord Pipelines ---
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/auth/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          DISCORD_SECRET_NAME: "DiscordSecrets"
+          APP_SECRET_NAME: "AppSecrets"
+          FRONTEND_URL: !Sub "https://${FrontendDistribution.DomainName}"
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:AppSecrets-*"
+      Events:
+        AuthCallbackApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CanvasRestApi
+            Path: /auth/callback
+            Method: get
+            Auth:
+              Authorizer: NONE
+
+  DiscordProxyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/discord_proxy/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref PixelEventsTopic
+          DISCORD_SECRET_NAME: "DiscordSecrets"
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt PixelEventsTopic.TopicName
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
+      Events:
+        DiscordInteractionsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CanvasRestApi
+            Path: /discord/interactions
+            Method: post
+            Auth:
+              Authorizer: NONE
+
+  SnapshotWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/snapshot_worker/
+      Handler: app.lambda_handler
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+          SNAPSHOT_BUCKET: !Ref SnapshotsBucket
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref CanvasPixelsTable
+        - S3WritePolicy:
+            BucketName: !Ref SnapshotsBucket
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SnapshotWorkerQueue.Arn
+
+  DiscordNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/discord_notifier/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          DISCORD_SECRET_NAME: "DiscordSecrets"
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
+        - Statement:
+            - Effect: Allow
+              Action: "s3:GetObject"
+              Resource: !Sub "arn:aws:s3:::${AWS::StackName}-snapshots-${AWS::AccountId}/*"
+      Events:
+        SnapshotCreatedEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref SnapshotsBucket
+            Events: s3:ObjectCreated:*
+
+  # ==========================================
+  # 7. OBSERVABILITY (Alarms)
+  # ==========================================
+  SQSDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: PixelWorker-DLQ-Alarm
+      AlarmDescription: "Alerts if pixel events fall into the Dead Letter Queue"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PixelWorkerDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+Outputs:
+  FrontendWebsiteURL:
+    Description: "CloudFront URL for the static web app"
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+  RestApiURL:
+    Description: "Base URL for your REST API"
+    Value: !Sub "https://${CanvasRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  WebSocketURL:
+    Description: "WSS URL for real-time frontend connections"
+    Value: !Sub "wss://${PixelWebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production"
