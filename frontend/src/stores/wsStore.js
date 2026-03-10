@@ -8,7 +8,7 @@ let reconnectTimer = null;
 
 export const connectWebSocket = (wsUrl) => {
     if (!wsUrl) return;
-    
+
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
         return; // Already connecting or connected
     }
@@ -28,8 +28,8 @@ export const connectWebSocket = (wsUrl) => {
     socket.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            
-            // Dispatch a custom event to the window so the Canvas component 
+
+            // Dispatch a custom event to the window so the Canvas component
             // can pick it up without going through Svelte's reactive engine
             if (data.type === 'pixel_update') {
                window.dispatchEvent(new CustomEvent('pixel_update', { detail: data.data }));
@@ -43,7 +43,7 @@ export const connectWebSocket = (wsUrl) => {
         isConnected.set(false);
         console.log("WebSocket disconnected. Reconnecting in 3s...");
         socket = null;
-        
+
         // Auto-reconnect
         if (!reconnectTimer) {
             reconnectTimer = setTimeout(() => {

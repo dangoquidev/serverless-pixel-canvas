@@ -7,12 +7,29 @@
   } from "../stores/authStore.js";
 
   $: isLoggedIn = !!$authToken;
+  let dismissedByUser = false;
+
+  // Reset dismissed state when user logs in (so modal shows again after logout)
+  $: if ($authToken) dismissedByUser = false;
+
+  $: showModal = !isLoggedIn && !dismissedByUser;
+
+  function closeModal() {
+    dismissedByUser = true;
+  }
+
+  function handleOverlayClick(e) {
+    if (e.target === e.currentTarget) closeModal();
+  }
 </script>
 
-{#if !isLoggedIn}
-  <div class="modal-overlay">
+{#if showModal}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click={handleOverlayClick} role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" tabindex="-1">
     <div class="panel login-panel">
-      <h2>Authentication Required</h2>
+      <button class="close-btn" on:click={closeModal} aria-label="Close">×</button>
+      <h2 id="auth-modal-title">Authentication Required</h2>
       <p>You must login with Discord to draw pixels on the canvas.</p>
       {#if $authError}
         <div class="error-message" role="alert">
@@ -30,8 +47,31 @@
 
 <style>
   .login-panel {
+    position: relative;
     text-align: center;
     max-width: 400px;
+  }
+
+  .close-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 28px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    background: white;
+    border: 2px solid black;
+  }
+
+  .close-btn:hover {
+    background: var(--accent-color);
+    color: white;
   }
 
   .error-message {

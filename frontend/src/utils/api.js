@@ -5,7 +5,7 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 const request = async (endpoint, options = {}) => {
     const token = get(authToken);
-    
+
     const headers = {
         'Content-Type': 'application/json',
         ...options.headers,
@@ -21,7 +21,7 @@ const request = async (endpoint, options = {}) => {
     };
 
     const response = await fetch(`${API_URL}${endpoint}`, config);
-    
+
     if (response.status === 401) {
         // Unauthorized - token might be invalid/expired
         authToken.set(null);
@@ -42,15 +42,19 @@ export const drawPixel = async (x, y, color) => {
         method: 'POST',
         body: JSON.stringify({ x, y, color })
     });
-    
+    console.log(res);
+
     if (res.status === 429) {
         const data = await res.json();
         throw new Error(data.message || "Rate limited");
     }
-    
+    if (res.status === 401) {
+        throw new Error("You need to be logged in to draw pixels");
+    }
+
     if (!res.ok) {
         throw new Error("Failed to draw pixel");
     }
-    
+
     return true;
 };
