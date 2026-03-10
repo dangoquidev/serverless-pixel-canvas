@@ -1,0 +1,28 @@
+version = 0.1
+
+[prod.deploy.parameters]
+stack_name = "pixel-canvas-stack"
+resolve_s3 = true
+tags = ["AppManagerCFNStackKey=pixel-canvas"]
+s3_prefix = "pixel-canvas-stack"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+image_repositories = []
+
+[prod.global.parameters]
+region = "eu-west-3"
+
+[default.deploy.parameters]
+stack_name = "pixel-canvas-stack"
+resolve_s3 = true
+tags = ["AppManagerCFNStackKey=pixel-canvas"]
+s3_prefix = "pixel-canvas-stack"
+region = "eu-west-3"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+image_repositories = []
+
+[default.global.parameters]
+region = "eu-west-3"
