@@ -26,7 +26,6 @@ def test_web_proxy_valid_payload():
     sns.subscribe(TopicArn=os.environ["SNS_TOPIC_ARN"], Protocol="sqs", Endpoint=queue_arn)
     
     payload = {
-        "user_id": "user123",
         "x": 500,
         "y": 500,
         "color": "#000000"
@@ -34,7 +33,10 @@ def test_web_proxy_valid_payload():
     
     event = {
         "body": json.dumps(payload),
-        "correlation_id": "test-corr-id"
+        "correlation_id": "test-corr-id",
+        "requestContext": {
+            "authorizer": {"userId": "user123", "username": "testuser"}
+        }
     }
     
     # Act
@@ -51,16 +53,31 @@ def test_web_proxy_valid_payload():
     
     assert published_event["action"] == "draw_pixel"
     assert published_event["payload"]["x"] == 500
+    assert published_event["payload"]["user_id"] == "user123"
     assert published_event["correlation_id"] == "test-corr-id"
+
+
+def test_web_proxy_missing_authorizer():
+    """Test that missing user_id in authorizer context returns 401."""
+    event = {
+        "body": json.dumps({"x": 0, "y": 0, "color": "#000"}),
+        "requestContext": {}
+    }
+    response = lambda_handler(event, MockLambdaContext())
+    assert response["statusCode"] == 401
+    body = json.loads(response["body"])
+    assert "Unauthorized" in body["error"]
+
 
 def test_web_proxy_missing_fields():
     """Test that missing required fields in the payload returns a 400 Bad Request."""
     payload = {
         "x": 500,
-        # missing y, color, user_id
+        # missing y, color
     }
     event = {
-        "body": json.dumps(payload)
+        "body": json.dumps(payload),
+        "requestContext": {"authorizer": {"userId": "user123"}}
     }
     
     response = lambda_handler(event, MockLambdaContext())
@@ -71,7 +88,8 @@ def test_web_proxy_missing_fields():
 def test_web_proxy_invalid_json():
     """Test that invalid JSON is caught."""
     event = {
-        "body": "this is not json"
+        "body": "this is not json",
+        "requestContext": {"authorizer": {"userId": "user123"}}
     }
     response = lambda_handler(event, MockLambdaContext())
     assert response["statusCode"] == 400

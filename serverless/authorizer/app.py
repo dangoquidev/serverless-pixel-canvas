@@ -1,5 +1,7 @@
 import os
 import uuid
+from datetime import datetime, timezone
+
 import jwt
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities import parameters
@@ -20,8 +22,18 @@ def get_jwt_secret() -> str:
 # --- Helper Functions ---
 
 
-def generate_policy(principal_id: str, effect: str, resource: str) -> dict:
-    """Generates the IAM policy expected by API Gateway Custom Authorizers."""
+def generate_policy(
+    principal_id: str,
+    effect: str,
+    resource: str,
+    user_id: str | None = None,
+    username: str | None = None,
+) -> dict:
+    """Generates the IAM policy expected by API Gateway Custom Authorizers.
+    The context object acts as a secure "shuttle" carrying metadata from the
+    identity check into the backend Lambda via event.requestContext.authorizer.
+    All context values must be strings (API Gateway requirement).
+    """
     auth_response = {"principalId": principal_id}
     if effect and resource:
         policy_document = {
@@ -31,6 +43,15 @@ def generate_policy(principal_id: str, effect: str, resource: str) -> dict:
             ],
         }
         auth_response["policyDocument"] = policy_document
+
+    # Shuttle: pass identity to downstream Lambda
+    if user_id is not None:
+        auth_response["context"] = {
+            "userId": str(user_id),
+            "username": str(username or ""),
+            "authTimestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
     return auth_response
 
 
@@ -65,18 +86,17 @@ def lambda_handler(event: dict, context: LambdaContext):
     try:
         decoded_payload = jwt.decode(token, jwt_secret, algorithms=["HS256"])
         user_id = decoded_payload.get("sub")
+        username = decoded_payload.get("username")
 
-        # Ensure the token actually contains the identity we need
         if not user_id:
             raise jwt.InvalidTokenError("Token missing 'sub' claim")
 
         logger.info(
             "User successfully authorized",
-            extra={"user_id": user_id, "correlation_id": correlation_id},
+            extra={"user_id": user_id, "username": username, "correlation_id": correlation_id},
         )
 
-        # Token is valid: Allow access to the API resource
-        return generate_policy(user_id, "Allow", method_arn)
+        return generate_policy(user_id, "Allow", method_arn, user_id=user_id)
 
     except jwt.ExpiredSignatureError:
         logger.warning("Token expired", extra={"correlation_id": correlation_id})
