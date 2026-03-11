@@ -37,12 +37,17 @@ export const fetchCanvas = async () => {
     return res.json();
 };
 
+export const fetchChunk = async (cx, cy) => {
+    const res = await request(`/canvas?cx=${cx}&cy=${cy}`);
+    if (!res.ok) throw new Error(`Failed to fetch chunk ${cx},${cy}`);
+    return res.json();
+};
+
 export const drawPixel = async (x, y, color) => {
     const res = await request('/pixels', {
         method: 'POST',
         body: JSON.stringify({ x, y, color })
     });
-    console.log(res);
 
     if (res.status === 429) {
         const data = await res.json();

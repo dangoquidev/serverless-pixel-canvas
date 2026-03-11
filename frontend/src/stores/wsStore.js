@@ -22,17 +22,19 @@ export const connectWebSocket = (wsUrl) => {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
         }
-        console.log("WebSocket connected!");
     };
 
     socket.onmessage = (event) => {
         try {
-            const data = JSON.parse(event.data);
+            const parsedData = JSON.parse(event.data);
+            const messages = Array.isArray(parsedData) ? parsedData : [parsedData];
 
-            // Dispatch a custom event to the window so the Canvas component
-            // can pick it up without going through Svelte's reactive engine
-            if (data.type === 'pixel_update') {
-               window.dispatchEvent(new CustomEvent('pixel_update', { detail: data.data }));
+            const newPixels = messages
+                .filter(msg => msg.type === 'pixel_update')
+                .map(msg => msg.data);
+
+            if (newPixels.length > 0) {
+                window.dispatchEvent(new CustomEvent('pixel_batch_update', { detail: newPixels }));
             }
         } catch (e) {
             console.error("Failed to parse WebSocket message:", e);
