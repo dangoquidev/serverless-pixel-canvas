@@ -6,277 +6,192 @@
     loadedChunks,
   } from "../stores/canvasStore.js";
   import { fetchChunk, drawPixel } from "../utils/api.js";
+  import { connectWebSocket, disconnectWebSocket } from "../stores/wsStore.js";
+  import { CanvasEngine } from "../utils/CanvasEngine.js";
 
-  const CANVAS_WIDTH = 1000;
-  const CANVAS_HEIGHT = 1000;
+  // Constants
+  const CANVAS_SIZE = 1000;
   const CHUNK_SIZE = 100;
 
   let canvasRef;
-  let ctx;
-
-  let scale = 10;
-  let translateX = 0;
-  let translateY = 0;
-
-  // Interaction state
+  let engine;
   let isDragging = false;
   let hasDragged = false;
-  let startDrag = { x: 0, y: 0, tx: 0, ty: 0 };
-
-  // We use CSS variables for hover to avoid Svelte reactivity thrashing on mousemove
-  let wrapperRef;
+  let dragStart = { x: 0, y: 0, vx: 0, vy: 0 };
 
   onMount(() => {
-    translateX = window.innerWidth / 2 - (CANVAS_WIDTH / 2) * scale;
-    translateY = window.innerHeight / 2 - (CANVAS_HEIGHT / 2) * scale;
+    engine = new CanvasEngine(canvasRef, CANVAS_SIZE, CANVAS_SIZE, CHUNK_SIZE);
+    // Initial Positioning: Center the canvas
+    engine.viewX = window.innerWidth / 2 - (CANVAS_SIZE / 2) * engine.scale;
+    engine.viewY = window.innerHeight / 2 - (CANVAS_SIZE / 2) * engine.scale;
 
-    ctx = canvasRef.getContext("2d", { alpha: false });
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    refreshVisibleArea();
 
-    calculateVisibleChunks();
-
-    window.addEventListener("pixel_batch_update", handleLiveUpdate);
+    connectWebSocket(import.meta.env.VITE_WS_URL);
+    window.addEventListener("ws_binary_update", handleWSUpdate);
+    window.addEventListener("resize", refreshVisibleArea);
   });
 
   onDestroy(() => {
-    window.removeEventListener("pixel_batch_update", handleLiveUpdate);
+    window.removeEventListener("ws_binary_update", handleWSUpdate);
+    window.removeEventListener("resize", refreshVisibleArea);
+    disconnectWebSocket();
   });
 
-  // --- Optimized Rendering ---
+  // --- Data Handling ---
 
-  function handleLiveUpdate(e) {
-    renderPixels(e.detail);
+  function handleWSUpdate(e) {
+    const view = e.detail; // Uint8Array [CX, CY, LX, LY, R, G, B]
+    for (let i = 0; i < view.length; i += 7) {
+      const gx = view[i] * CHUNK_SIZE + view[i + 2];
+      const gy = view[i + 1] * CHUNK_SIZE + view[i + 3];
+      engine.updatePixel(gx, gy, view[i + 4], view[i + 5], view[i + 6]);
+    }
+    engine.render();
   }
 
-  function renderPixels(pixels) {
-    if (!ctx) return;
-
-    // BATCH DRAWING: Much faster than switching context state per pixel
-    pixels.forEach((p) => {
-      // Fast string parsing: "PIXEL#150#200" -> x: 150, y: 200
-      const firstHash = p.PixelId.indexOf("#");
-      const secondHash = p.PixelId.indexOf("#", firstHash + 1);
-      const x = parseInt(p.PixelId.substring(firstHash + 1, secondHash), 10);
-      const y = parseInt(p.PixelId.substring(secondHash + 1), 10);
-
-      ctx.fillStyle = p.color;
-      ctx.fillRect(x, y, 1, 1);
-    });
-  }
-
-  // --- Spatial / Chunking Logic ---
-
-  async function calculateVisibleChunks() {
-    if (!wrapperRef) return;
-
-    const viewportWidth = window.innerWidth / scale;
-    const viewportHeight = window.innerHeight / scale;
-    const startX = -translateX / scale;
-    const startY = -translateY / scale;
-
-    const minCx = Math.max(0, Math.floor(startX / CHUNK_SIZE));
-    const minCy = Math.max(0, Math.floor(startY / CHUNK_SIZE));
-    const maxCx = Math.min(
-      9,
-      Math.floor((startX + viewportWidth) / CHUNK_SIZE),
+  async function refreshVisibleArea() {
+    const { minCx, minCy, maxCx, maxCy } = engine.getVisibleChunks(
+      window.innerWidth,
+      window.innerHeight,
     );
-    const maxCy = Math.min(
-      9,
-      Math.floor((startY + viewportHeight) / CHUNK_SIZE),
-    );
+    let chunksToFetch = [];
 
-    const chunksToLoad = [];
-
-    loadedChunks.update((loaded) => {
+    loadedChunks.update((set) => {
       for (let cx = minCx; cx <= maxCx; cx++) {
         for (let cy = minCy; cy <= maxCy; cy++) {
-          const chunkId = `${cx},${cy}`;
-          if (!loaded.has(chunkId)) {
-            loaded.add(chunkId);
-            chunksToLoad.push({ cx, cy });
+          if (!set.has(`${cx},${cy}`)) {
+            set.add(`${cx},${cy}`);
+            chunksToFetch.push({ cx, cy });
           }
         }
       }
-      return loaded;
+      return set;
     });
 
-    if (chunksToLoad.length > 0) {
-      try {
-        // 3. THE AWS THROTTLE FIX: Staggered loading.
-        // Instead of firing 16 requests in the same millisecond,
-        // we fetch them in tiny batches so AWS Lambda can keep up.
-        const BATCH_SIZE = 4;
-        for (let i = 0; i < chunksToLoad.length; i += BATCH_SIZE) {
-          const batch = chunksToLoad.slice(i, i + BATCH_SIZE);
-          const promises = batch.map((c) => fetchChunk(c.cx, c.cy));
-
-          const results = await Promise.all(promises);
-          results.forEach((res) => renderPixels(res.pixels));
-        }
-      } catch (err) {
-        console.error("Failed to load chunks", err);
+    if (chunksToFetch.length > 0) {
+      // Load in batches of 4 to prevent AWS Lambda throttling
+      for (let i = 0; i < chunksToFetch.length; i += 4) {
+        const batch = chunksToFetch.slice(i, i + 4);
+        await Promise.all(
+          batch.map(async ({ cx, cy }) => {
+            const buffer = await fetchChunk(cx, cy);
+            const view = new Uint8Array(buffer);
+            for (let j = 0; j < view.length; j += 5) {
+              engine.updatePixel(
+                cx * CHUNK_SIZE + view[j],
+                cy * CHUNK_SIZE + view[j + 1],
+                view[j + 2],
+                view[j + 3],
+                view[j + 4],
+              );
+            }
+          }),
+        );
+        engine.render();
       }
+    } else {
+      engine.render();
     }
   }
 
-  // --- Interaction Logic ---
+  // --- Interaction Handlers ---
 
-  async function handleCanvasClick(e) {
-    if (hasDragged || $cooldownRemaining > 0) return;
-
-    const { x, y } = clientToPixel(e.clientX, e.clientY);
-    if (x === null) return;
-
-    const colorToDraw = $selectedColor;
-
-    // Optimistic UI
-    ctx.fillStyle = colorToDraw;
-    ctx.fillRect(x, y, 1, 1);
-    cooldownRemaining.set(10000); // 10s cooldown
-
-    try {
-      await drawPixel(x, y, colorToDraw);
-    } catch (err) {
-      alert(`Error: ${err.message}`);
-    }
-  }
-
-  function handleWheel(e) {
-    // Zoom toward mouse pointer logic (simplified)
-    const zoomSensitivity = 0.002;
-    const newScale = Math.min(
-      Math.max(0.5, scale - e.deltaY * zoomSensitivity),
-      40,
-    );
-    scale = newScale;
-
-    // Recalculate chunks after zooming (debounced by rAF naturally via user stop)
-    requestAnimationFrame(calculateVisibleChunks);
-  }
-
-  function startPan(e) {
+  function handleMouseDown(e) {
     isDragging = true;
     hasDragged = false;
-    startDrag = { x: e.clientX, y: e.clientY, tx: translateX, ty: translateY };
-  }
-
-  function pan(e) {
-    if (!isDragging) return;
-
-    const dx = e.clientX - startDrag.x;
-    const dy = e.clientY - startDrag.y;
-
-    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasDragged = true;
-
-    // Direct assignment triggers Svelte reactivity, which is fine for transform
-    translateX = startDrag.tx + dx;
-    translateY = startDrag.ty + dy;
-  }
-
-  function stopPan() {
-    if (isDragging) {
-      isDragging = false;
-      calculateVisibleChunks(); // Only check for new chunks when they stop dragging
-    }
-  }
-
-  function clientToPixel(clientX, clientY) {
-    if (!canvasRef) return { x: null, y: null };
-    const rect = canvasRef.getBoundingClientRect();
-    const x = Math.floor((clientX - rect.left) / scale);
-    const y = Math.floor((clientY - rect.top) / scale);
-
-    if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT)
-      return { x, y };
-    return { x: null, y: null };
+    dragStart = {
+      x: e.clientX,
+      y: e.clientY,
+      vx: engine.viewX,
+      vy: engine.viewY,
+    };
   }
 
   function handleMouseMove(e) {
     if (isDragging) {
-      pan(e);
+      const dx = e.clientX - dragStart.x;
+      const dy = e.clientY - dragStart.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasDragged = true;
+      engine.viewX = dragStart.vx + dx;
+      engine.viewY = dragStart.vy + dy;
+      engine.render();
     } else {
-      // Update CSS variables directly to bypass Svelte virtual DOM diffing for high-frequency events
-      const { x, y } = clientToPixel(e.clientX, e.clientY);
-      if (x !== null && wrapperRef) {
-        wrapperRef.style.setProperty("--hover-x", `${x}px`);
-        wrapperRef.style.setProperty("--hover-y", `${y}px`);
-        wrapperRef.style.setProperty("--hover-display", "block");
-      } else if (wrapperRef) {
-        wrapperRef.style.setProperty("--hover-display", "none");
+      const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
+      if (x !== null) {
+        canvasRef.style.setProperty("--hover-x", `${x}`);
+        canvasRef.style.setProperty("--hover-y", `${y}`);
       }
     }
   }
+
+  function handleMouseUp() {
+    if (isDragging) {
+      isDragging = false;
+      refreshVisibleArea();
+    }
+  }
+
+  async function handleCanvasClick(e) {
+    if (hasDragged || $cooldownRemaining > 0) return;
+    const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
+    if (x === null) return;
+
+    const color = $selectedColor;
+    const { r, g, b } = engine.hexToRgb(color);
+
+    // Optimistic UI
+    engine.updatePixel(x, y, r, g, b);
+    engine.render();
+    cooldownRemaining.set(10); // 10s cooldown example
+
+    try {
+      await drawPixel(x, y, color);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  function handleWheel(e) {
+    const zoomDir = e.deltaY > 0 ? 0.9 : 1.1;
+    engine.scale = Math.min(Math.max(0.5, engine.scale * zoomDir), 50);
+    engine.render();
+    refreshVisibleArea();
+  }
 </script>
 
-<svelte:window on:mouseup={stopPan} on:mouseleave={stopPan} />
+<svelte:window on:mouseup={handleMouseUp} />
 
-<div
-  class="canvas-container"
-  on:wheel|preventDefault={handleWheel}
-  on:mousedown={startPan}
+<main
+  on:mousedown={handleMouseDown}
   on:mousemove={handleMouseMove}
+  on:wheel|preventDefault={handleWheel}
 >
-  <div
-    bind:this={wrapperRef}
-    class="canvas-wrapper"
-    style="transform: translate({translateX}px, {translateY}px) scale({scale});"
-  >
-    <canvas
-      bind:this={canvasRef}
-      width={CANVAS_WIDTH}
-      height={CANVAS_HEIGHT}
-      on:click={handleCanvasClick}
-    ></canvas>
-    <div class="pixel-hover"></div>
-  </div>
-</div>
+  <canvas
+    bind:this={canvasRef}
+    width={window.innerWidth}
+    height={window.innerHeight}
+    on:click={handleCanvasClick}
+    class:grabbing={isDragging}
+  ></canvas>
+</main>
 
 <style>
-  .canvas-container {
+  main {
     width: 100vw;
     height: 100vh;
+    background: #1a1a1a;
     overflow: hidden;
-    background-color: #2a2a2a; /* Darker background feels better for a canvas */
-    cursor: grab;
-    position: relative;
-  }
-  .canvas-container:active {
-    cursor: grabbing;
-  }
-
-  .canvas-wrapper {
-    position: absolute;
-    transform-origin: 0 0;
-    /* Hardware acceleration hint */
-    will-change: transform;
-
-    /* Default CSS variables for the hover cursor */
-    --hover-x: 0px;
-    --hover-y: 0px;
-    --hover-display: none;
+    touch-action: none;
   }
 
   canvas {
     display: block;
     image-rendering: pixelated;
-    box-shadow: 0px 0px 50px rgba(0, 0, 0, 0.5);
     cursor: crosshair;
   }
 
-  .pixel-hover {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 1px;
-    height: 1px;
-    display: var(--hover-display);
-    transform: translate(var(--hover-x), var(--hover-y));
-    pointer-events: none;
-    box-shadow:
-      0 0 0 0.5px rgba(255, 255, 255, 0.8),
-      0 0 0 1px rgba(0, 0, 0, 0.8);
-    /* Using transform instead of left/top is MUCH faster for browser rendering */
-    will-change: transform;
+  canvas.grabbing {
+    cursor: grabbing;
   }
 </style>

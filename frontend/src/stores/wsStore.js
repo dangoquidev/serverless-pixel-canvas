@@ -7,37 +7,24 @@ let socket = null;
 let reconnectTimer = null;
 
 export const connectWebSocket = (wsUrl) => {
-    if (!wsUrl) return;
-
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-        return; // Already connecting or connected
-    }
+    if (!wsUrl || socket) return;
 
     socket = new WebSocket(wsUrl);
+
+    socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
         isConnected.set(true);
         wsError.set(null);
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-        }
+        if (reconnectTimer) clearTimeout(reconnectTimer);
     };
 
     socket.onmessage = (event) => {
-        try {
-            const parsedData = JSON.parse(event.data);
-            const messages = Array.isArray(parsedData) ? parsedData : [parsedData];
 
-            const newPixels = messages
-                .filter(msg => msg.type === 'pixel_update')
-                .map(msg => msg.data);
+        const view = new Uint8Array(event.data);
 
-            if (newPixels.length > 0) {
-                window.dispatchEvent(new CustomEvent('pixel_batch_update', { detail: newPixels }));
-            }
-        } catch (e) {
-            console.error("Failed to parse WebSocket message:", e);
+        if (view.length > 0) {
+            window.dispatchEvent(new CustomEvent('ws_binary_update', { detail: view }));
         }
     };
 

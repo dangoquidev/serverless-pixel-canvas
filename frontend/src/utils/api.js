@@ -38,9 +38,9 @@ export const fetchCanvas = async () => {
 };
 
 export const fetchChunk = async (cx, cy) => {
-    const res = await request(`/canvas?cx=${cx}&cy=${cy}`);
-    if (!res.ok) throw new Error(`Failed to fetch chunk ${cx},${cy}`);
-    return res.json();
+    const response = await fetch(`${API_URL}/canvas?cx=${cx}&cy=${cy}`);
+    if (!response.ok) throw new Error(`Failed to fetch chunk ${cx},${cy}`);
+    return await response.arrayBuffer();
 };
 
 export const drawPixel = async (x, y, color) => {

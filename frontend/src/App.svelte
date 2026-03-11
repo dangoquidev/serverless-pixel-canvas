@@ -1,8 +1,7 @@
 <script>
   import "./app.css";
   import { onMount } from "svelte";
-  import { isConnected, connectWebSocket } from "./stores/wsStore.js";
-  import { fetchCanvas } from "./utils/api.js";
+  import { isConnected, wsError } from "./stores/wsStore.js";
 
   import AccountButton from "./components/AccountButton.svelte";
   import AuthModal from "./components/AuthModal.svelte";
@@ -10,27 +9,12 @@
   import CooldownTimer from "./components/CooldownTimer.svelte";
   import Canvas from "./components/Canvas.svelte";
 
-  let initialCanvasData = [];
   let isLoading = true;
-  let connectionError = null;
 
-  onMount(async () => {
-    try {
-      // 1. Fetch initial state of the board
-      const response = await fetchCanvas();
-      // Assuming response returns an array of pixel items
-      initialCanvasData = response.pixels || [];
-
-      // 2. Connect to the WebSocket stream
-      const WSS_URL =
-        import.meta.env.VITE_WSS_URL || "wss://localhost/production";
-      connectWebSocket(WSS_URL);
-    } catch (err) {
-      console.error("Initialization failed:", err);
-      connectionError = err.message;
-    } finally {
+  onMount(() => {
+    setTimeout(() => {
       isLoading = false;
-    }
+    }, 800);
   });
 </script>
 
@@ -40,53 +24,117 @@
   <Toolbar />
   <CooldownTimer />
 
+  <Canvas />
+
   {#if isLoading}
     <div class="modal-overlay">
-      <div class="panel">
-        <h2>LOADING CANVAS</h2>
-        <span class="blink">Please wait...</span>
+      <div class="panel loader">
+        <h2 class="glitch" data-text="SYSTEM BOOT">SYSTEM BOOT</h2>
+        <div class="progress-bar"><div class="fill"></div></div>
+        <span class="blink">INITIALIZING CANVAS...</span>
       </div>
     </div>
-  {:else if connectionError}
-    <div class="modal-overlay">
-      <div class="panel">
-        <h2>CONNECTION ERROR</h2>
-        <p>{connectionError}</p>
-      </div>
-    </div>
-  {:else}
-    <Canvas initialPixels={initialCanvasData} />
   {/if}
 
-  {#if !$isConnected && !isLoading && !connectionError}
-    <div class="offline-warning panel">OFFLINE - RECONNECTING...</div>
+  {#if $wsError}
+    <div class="notification error">
+      <strong>⚠️ CONNECTION ERROR:</strong>
+      {$wsError}
+    </div>
+  {:else if !$isConnected && !isLoading}
+    <div class="notification warning">
+      <span class="blink">●</span> OFFLINE - RECONNECTING
+    </div>
   {/if}
 </main>
 
 <style>
+  :global(body) {
+    margin: 0;
+    padding: 0;
+    background: #1a1a1a;
+    color: #00ff00; /* Retro terminal green */
+    font-family: "Courier New", Courier, monospace;
+    overflow: hidden;
+  }
+
   main {
     width: 100vw;
     height: 100vh;
     position: relative;
+  }
+
+  /* Status Notifications */
+  .notification {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    border: 2px solid currentColor;
+    z-index: 2000;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    background: rgba(0, 0, 0, 0.9);
+  }
+
+  .warning {
+    color: #ffcc00;
+  }
+  .error {
+    color: #ff0044;
+  }
+
+  /* Loading Overlay */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+
+  .loader {
+    text-align: center;
+    min-width: 300px;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 4px;
+    background: #333;
+    margin: 20px 0;
+    position: relative;
     overflow: hidden;
+  }
+
+  .fill {
+    width: 100%;
+    height: 100%;
+    background: #00ff00;
+    animation: load 0.8s ease-in-out forwards;
+    transform-origin: left;
+  }
+
+  @keyframes load {
+    0% {
+      transform: scaleX(0);
+    }
+    100% {
+      transform: scaleX(1);
+    }
   }
 
   .blink {
     animation: blink 1s step-end infinite;
+    font-size: 0.7rem;
   }
 
   @keyframes blink {
     50% {
       opacity: 0;
     }
-  }
-
-  .offline-warning {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    background: var(--accent-color);
-    color: white;
-    z-index: 1000;
   }
 </style>
