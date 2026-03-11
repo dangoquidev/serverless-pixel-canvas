@@ -73,6 +73,7 @@ def stream_image_to_binary(new_image: dict) -> bytearray:
     # Pack exactly 7 bytes per pixel
     return bytearray([cx, cy, local_x, local_y, r, g, b])
 
+
 def pixel_to_binary(x: int, y: int, color: str) -> bytearray:
     """
     Converts raw x, y, and hex color into a 7-byte binary frame:
