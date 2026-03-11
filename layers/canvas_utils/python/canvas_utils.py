@@ -1,3 +1,4 @@
+import json
 import time
 
 
@@ -71,3 +72,18 @@ def stream_image_to_binary(new_image: dict) -> bytearray:
 
     # Pack exactly 7 bytes per pixel
     return bytearray([cx, cy, local_x, local_y, r, g, b])
+
+def pixel_to_binary(x: int, y: int, color: str) -> bytearray:
+    """
+    Converts raw x, y, and hex color into a 7-byte binary frame:
+    [CX, CY, LX, LY, R, G, B]
+    """
+    # Coordinate Math
+    cx, cy = x // CHUNK_SIZE, y // CHUNK_SIZE
+    lx, ly = x % CHUNK_SIZE, y % CHUNK_SIZE
+
+    # Color Math (assuming hex_to_int and int_to_rgb are also in your utils)
+    r, g, b = int_to_rgb(hex_to_int(color))
+
+    # Pack exactly 7 bytes
+    return bytearray([cx, cy, lx, ly, r, g, b])

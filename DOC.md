@@ -24,15 +24,16 @@ graph TD
     %% WS Functions
     WSManagerFn(⚡ websocket_manager)
 
-    %% Messaging
+    %% Messaging (The 3-Queue Fan-Out)
     SNSTopic{📢 SNS Topic: pixel-events}
     SQSPixel(📨 SQS: Pixel Queue)
+    SQSBroadcast(📨 SQS: Broadcast Queue)
     SQSSnapshot(📨 SQS: Snapshot Queue)
 
     %% Workers
     PixelWorkerFn(⚡ pixel_worker)
-    SnapshotWorkerFn(⚡ snapshot_worker)
     BroadcastWorkerFn(⚡ broadcast_worker)
+    SnapshotWorkerFn(⚡ snapshot_worker)
     DiscordNotifierFn(⚡ discord_notifier)
     AuthorizerFn(⚡ authorizer)
 
@@ -45,7 +46,7 @@ graph TD
 
     %% --- Connections ---
 
-    %% 1. The Read Path (NEW)
+    %% 1. The Read Path
     UserWeb -->|HTTP GET /canvas| APIGW_REST
     APIGW_REST -->|Trigger| CanvasReaderFn
     CanvasReaderFn -->|Query 5-Byte Chunks| DDCV
@@ -60,22 +61,23 @@ graph TD
     APIGW_REST --> DiscordProxyFn
     APIGW_WS --> WSManagerFn
 
-    %% 3. Routing & Messaging
+    %% 3. Routing & Messaging (The Fan-Out)
     WSManagerFn -->|Store/Delete Conn| DDWS
     WebProxyFn -->|Publish| SNSTopic
     DiscordProxyFn -->|Verify Signature & Publish| SNSTopic
 
-    SNSTopic --> SQSPixel
-    SNSTopic --> SQSSnapshot
+    SNSTopic -->|Persistence| SQSPixel
+    SNSTopic -->|Fast-Path UI| SQSBroadcast
+    SNSTopic -->|Background| SQSSnapshot
 
-    %% 4. The Pixel Worker Flow
+    %% 4. The Pixel Worker Flow (Slow Path)
     SQSPixel --> PixelWorkerFn
     PixelWorkerFn -->|Check Limit| DDRL
     PixelWorkerFn -->|Write Minified Pixel| DDCV
 
-    %% 5. The Real-Time Broadcast Flow
-    DDCV -->|DynamoDB Stream| BroadcastWorkerFn
-    BroadcastWorkerFn -->|Fetch Conns| DDWS
+    %% 5. The Real-Time Broadcast Flow (Fast Path)
+    SQSBroadcast -->|Batch of Pixels| BroadcastWorkerFn
+    BroadcastWorkerFn -->|Query GSI: LiveStatus=ACTIVE| DDWS
     BroadcastWorkerFn -->|Push 7-Byte Binary Frame| APIGW_WS
     APIGW_WS -->|Broadcast| UserWeb
 

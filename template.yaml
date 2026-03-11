@@ -112,8 +112,6 @@ Resources:
           KeyType: HASH
         - AttributeName: p
           KeyType: RANGE
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES
 
   WebSocketConnectionsTable:
     Type: AWS::DynamoDB::Table
@@ -123,9 +121,18 @@ Resources:
       AttributeDefinitions:
         - AttributeName: ConnectionId
           AttributeType: S
+        - AttributeName: LiveStatus
+          AttributeType: S
       KeySchema:
         - AttributeName: ConnectionId
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: LiveStatusIndex
+          KeySchema:
+            - AttributeName: LiveStatus
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
 
   RateLimitsTable:
     Type: AWS::DynamoDB::Table
@@ -154,6 +161,7 @@ Resources:
     Properties:
       TopicName: pixel-events-topic
 
+  # Dead Letter Queue
   PixelWorkerDLQ:
     Type: AWS::SQS::Queue
 
@@ -185,6 +193,7 @@ Resources:
       TopicArn: !Ref PixelEventsTopic
       Endpoint: !GetAtt PixelWorkerQueue.Arn
 
+  # Snapshot Queue
   SnapshotWorkerQueue:
     Type: AWS::SQS::Queue
 
@@ -208,6 +217,31 @@ Resources:
       Protocol: sqs
       TopicArn: !Ref PixelEventsTopic
       Endpoint: !GetAtt SnapshotWorkerQueue.Arn
+
+#Broadcast Queue
+  BroadcastWorkerQueue:
+    Type: AWS::SQS::Queue
+
+  BroadcastWorkerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref BroadcastWorkerQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: "sns.amazonaws.com" }
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt BroadcastWorkerQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref PixelEventsTopic }
+
+  BroadcastWorkerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref PixelEventsTopic
+      Endpoint: !GetAtt BroadcastWorkerQueue.Arn
 
   # ==========================================
   # 4. REST API & CUSTOM AUTHORIZER
@@ -375,12 +409,12 @@ Resources:
               Action: [ "execute-api:ManageConnections" ]
               Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PixelWebSocketApi}/production/*"
       Events:
-        StreamEvent:
-          Type: DynamoDB
+        SQSEvent:
+          Type: SQS
           Properties:
-            Stream: !GetAtt CanvasPixelsTableV2.StreamArn
-            StartingPosition: LATEST
-            BatchSize: 100
+            Queue: !GetAtt BroadcastWorkerQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 1
 
   WebSocketManagerFunction:
     Type: AWS::Serverless::Function
