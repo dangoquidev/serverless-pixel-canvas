@@ -83,25 +83,37 @@ Resources:
       BucketName: !Sub "${AWS::StackName}-snapshots-${AWS::AccountId}"
 
   # ==========================================
+  # SHARED LAYERS
+  # ==========================================
+  CanvasUtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: canvas-shared-utils
+      Description: Shared binary encoding/decoding utilities
+      ContentUri: layers/canvas_utils/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Retain
+  # ==========================================
   # 2. DATABASES (DynamoDB)
   # ==========================================
   CanvasPixelsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: canvas-pixels
+      TableName: canvas-pixels-v2
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: ChunkId
-          AttributeType: S
-        - AttributeName: PixelId
-          AttributeType: S
+        - AttributeName: c
+          AttributeType: S   # 'c' is the Chunk Partition (String, e.g., "5#5")
+        - AttributeName: p
+          AttributeType: N   # 'p' is the Local Position (Number, e.g., 5050)
       KeySchema:
-        - AttributeName: ChunkId
+        - AttributeName: c
           KeyType: HASH
-        - AttributeName: PixelId
+        - AttributeName: p
           KeyType: RANGE
       StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES # Mandatory for the Broadcast Worker
+        StreamViewType: NEW_AND_OLD_IMAGES
 
   WebSocketConnectionsTable:
     Type: AWS::DynamoDB::Table
@@ -204,6 +216,8 @@ Resources:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
+      BinaryMediaTypes:
+        - "application/octet-stream"
       Cors:
         AllowMethods: "'GET,POST,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization'"
@@ -303,6 +317,8 @@ Resources:
     Properties:
       CodeUri: serverless/pixel_worker/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref CanvasUtilsLayer
       Environment:
         Variables:
           CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
@@ -380,6 +396,8 @@ Resources:
     Properties:
       CodeUri: serverless/canvas_reader/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref CanvasUtilsLayer
       Environment:
         Variables:
           CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
