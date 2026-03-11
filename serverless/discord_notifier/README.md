@@ -7,7 +7,7 @@
 * **Event:** `s3:ObjectCreated:*`
 
 **Environment Variables:**
-* `DISCORD_APP_ID`: Used to construct the Discord API webhook URL.
+* `DISCORD_SECRET_NAME`: Secrets Manager secret with `AppId` (required) and optionally `BotToken` (if you get 403 Forbidden from Discord API).
 
 **IAM Permissions Required:**
 * `s3:GetObject` (to read metadata) on the `SnapshotsBucket`.

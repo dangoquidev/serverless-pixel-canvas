@@ -202,6 +202,16 @@ frontend-deploy: frontend-build
 frontend: frontend-install frontend-env frontend-deploy
 
 # ------------------------------------------------------------------------------
+# Phase 5 — Discord Commands
+# ------------------------------------------------------------------------------
+discord-commands:
+	@echo "Registering Discord commands..."
+	python script/register_commands.py
+
+uv-discord-commands:
+	@echo "Registering Discord commands using uv..."
+	uv run python script/register_commands.py
+# ------------------------------------------------------------------------------
 # Full flow
 # ------------------------------------------------------------------------------
 all: redeploy frontend
