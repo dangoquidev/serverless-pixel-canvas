@@ -9,45 +9,58 @@ This project is a **fully serverless**, **event-driven** collaborative pixel dra
 ```mermaid
 graph TD
     %% Clients
-    UserWeb(Web User)
-    UserDiscord(Discord User)
+    UserWeb(👤 Web User)
+    UserDiscord(👾 Discord User)
 
     %% API Proxies
-    APIGW_REST[API Gateway REST]
-    APIGW_WS[API Gateway WebSocket]
-    WebProxyFn(web_proxy)
-    DiscordProxyFn(discord_proxy)
-    WSManagerFn(websocket_manager)
+    APIGW_REST[🚪 API Gateway REST]
+    APIGW_WS[🚪 API Gateway WebSocket]
+
+    %% REST Functions
+    WebProxyFn(⚡ web_proxy)
+    DiscordProxyFn(⚡ discord_proxy)
+    CanvasReaderFn(⚡ canvas_reader)
+
+    %% WS Functions
+    WSManagerFn(⚡ websocket_manager)
 
     %% Messaging
-    SNSTopic{SNS Topic: pixel-events}
-    SQSPixel(SQS: Pixel Queue)
-    SQSSnapshot(SQS: Snapshot Queue)
+    SNSTopic{📢 SNS Topic: pixel-events}
+    SQSPixel(📨 SQS: Pixel Queue)
+    SQSSnapshot(📨 SQS: Snapshot Queue)
 
     %% Workers
-    PixelWorkerFn(pixel_worker)
-    SnapshotWorkerFn(snapshot_worker)
-    BroadcastWorkerFn(broadcast_worker)
-    DiscordNotifierFn(discord_notifier)
-    AuthorizerFn(authorizer)
+    PixelWorkerFn(⚡ pixel_worker)
+    SnapshotWorkerFn(⚡ snapshot_worker)
+    BroadcastWorkerFn(⚡ broadcast_worker)
+    DiscordNotifierFn(⚡ discord_notifier)
+    AuthorizerFn(⚡ authorizer)
 
     %% Data Stores
-    DDCV[(DynamoDB: canvas-pixels)]
-    DDWS[(DynamoDB: websocket-connections)]
-    DDRL[(DynamoDB: rate-limits)]
-    S3Snapshots[(S3: SnapshotsBucket)]
-    S3WebStatic[(S3: WebHosting)]
+    DDCV[(💾 DynamoDB: canvas-pixels)]
+    DDWS[(💾 DynamoDB: websocket-connections)]
+    DDRL[(💾 DynamoDB: rate-limits)]
+    S3Snapshots[(🪣 S3: SnapshotsBucket)]
+    S3WebStatic[(🪣 S3: WebHosting)]
 
-    %% Connections
-    UserWeb -->|HTTP POST| APIGW_REST
+    %% --- Connections ---
+
+    %% 1. The Read Path (NEW)
+    UserWeb -->|HTTP GET /canvas| APIGW_REST
+    APIGW_REST -->|Trigger| CanvasReaderFn
+    CanvasReaderFn -->|Query 5-Byte Chunks| DDCV
+
+    %% 2. The Write / Interaction Path
+    UserWeb -->|HTTP POST /pixel| APIGW_REST
     UserWeb -->|WS Connect| APIGW_WS
     UserDiscord -->|Slash Command| APIGW_REST
-    APIGW_REST -->|Auth| AuthorizerFn
 
+    APIGW_REST -->|Auth Check| AuthorizerFn
     APIGW_REST --> WebProxyFn
     APIGW_REST --> DiscordProxyFn
     APIGW_WS --> WSManagerFn
 
+    %% 3. Routing & Messaging
     WSManagerFn -->|Store/Delete Conn| DDWS
     WebProxyFn -->|Publish| SNSTopic
     DiscordProxyFn -->|Verify Signature & Publish| SNSTopic
@@ -55,21 +68,24 @@ graph TD
     SNSTopic --> SQSPixel
     SNSTopic --> SQSSnapshot
 
+    %% 4. The Pixel Worker Flow
     SQSPixel --> PixelWorkerFn
-    PixelWorkerFn -->|Check| DDRL
-    PixelWorkerFn -->|Write Pixel| DDCV
+    PixelWorkerFn -->|Check Limit| DDRL
+    PixelWorkerFn -->|Write Minified Pixel| DDCV
 
+    %% 5. The Real-Time Broadcast Flow
     DDCV -->|DynamoDB Stream| BroadcastWorkerFn
-    BroadcastWorkerFn -->|Read Conns| DDWS
-    BroadcastWorkerFn -->|Push pixels| APIGW_WS
+    BroadcastWorkerFn -->|Fetch Conns| DDWS
+    BroadcastWorkerFn -->|Push 7-Byte Binary Frame| APIGW_WS
     APIGW_WS -->|Broadcast| UserWeb
 
+    %% 6. The Snapshot & Discord Flow
     SQSSnapshot --> SnapshotWorkerFn
-    SnapshotWorkerFn -->|Scan| DDCV
+    SnapshotWorkerFn -->|Scan Minified Data| DDCV
     SnapshotWorkerFn -->|Upload PNG w/ Token| S3Snapshots
 
-    S3Snapshots -->|S3 Event| DiscordNotifierFn
-    DiscordNotifierFn -->|PATCH Message| UserDiscord
+    S3Snapshots -->|S3 ObjectCreated Event| DiscordNotifierFn
+    DiscordNotifierFn -->|PATCH Presigned URL| UserDiscord
 ```
 
 ---
