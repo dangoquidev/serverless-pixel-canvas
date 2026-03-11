@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import {
     selectedColor,
-    cooldownRemaining,
     loadedChunks,
+    pixelsRemaining,
   } from "../stores/canvasStore.js";
   import { fetchChunk, drawPixel } from "../utils/api.js";
   import { connectWebSocket, disconnectWebSocket } from "../stores/wsStore.js";
@@ -14,6 +14,7 @@
   const CHUNK_SIZE = 100;
 
   let canvasRef;
+  let hoverRef;
   let engine;
   let isDragging = false;
   let hasDragged = false;
@@ -127,24 +128,28 @@
   }
 
   async function handleCanvasClick(e) {
-    if (hasDragged || $cooldownRemaining > 0) return;
+    if (hasDragged || $pixelsRemaining <= 0) return;
+
     const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
     if (x === null) return;
 
     const color = $selectedColor;
     const { r, g, b } = engine.hexToRgb(color);
 
-    // Optimistic UI
     engine.updatePixel(x, y, r, g, b);
     engine.render();
-    cooldownRemaining.set(10); // 10s cooldown example
+
+    pixelsRemaining.update((n) => n - 1);
 
     try {
       await drawPixel(x, y, color);
     } catch (err) {
       console.error(err);
+
+      pixelsRemaining.update((n) => n + 1);
     }
   }
+
   let refreshTimeout;
 
   /**
@@ -158,11 +163,16 @@
   }
 
   function handleWheel(e) {
-    const zoomDir = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.min(Math.max(0.5, engine.scale * zoomDir), 50);
-    engine.scale = newScale;
+    const ZOOM_SPEED = 0.002;
 
+    const zoomFactor = Math.exp(-e.deltaY * ZOOM_SPEED);
+
+    const newScale = Math.min(Math.max(0.5, engine.scale * zoomFactor), 50);
+
+    engine.scale = newScale;
     engine.render();
+
+    if (hoverRef) hoverRef.style.display = "none";
 
     debouncedRefresh();
   }
@@ -178,15 +188,24 @@
       engine.viewY = dragStart.vy + dy;
       engine.render();
 
+      if (hoverRef) hoverRef.style.display = "none";
+
       debouncedRefresh();
     } else {
       const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
-      if (x !== null) {
-        canvasRef.style.setProperty("--hover-x", `${x}`);
-        canvasRef.style.setProperty("--hover-y", `${y}`);
-        canvasRef.style.setProperty("--hover-display", "block");
-      } else {
-        canvasRef.style.setProperty("--hover-display", "none");
+
+      if (x !== null && hoverRef) {
+        const screenX = engine.viewX + x * engine.scale;
+        const screenY = engine.viewY + y * engine.scale;
+
+        hoverRef.style.transform = `translate(${screenX}px, ${screenY}px)`;
+
+        hoverRef.style.width = `${engine.scale}px`;
+        hoverRef.style.height = `${engine.scale}px`;
+
+        hoverRef.style.display = "block";
+      } else if (hoverRef) {
+        hoverRef.style.display = "none";
       }
     }
   }
@@ -194,20 +213,24 @@
 
 <svelte:window on:mouseup={handleMouseUp} />
 
-<main
-  role="application"
-  aria-label="Pixel canvas"
-  on:mousedown={handleMouseDown}
-  on:mousemove={handleMouseMove}
-  on:wheel|preventDefault={handleWheel}
->
+<main>
   <canvas
     bind:this={canvasRef}
     width={window.innerWidth}
     height={window.innerHeight}
+    aria-label="Interactive pixel canvas"
+    tabindex="0"
+    on:mousedown={handleMouseDown}
+    on:mousemove={handleMouseMove}
+    on:wheel|preventDefault={handleWheel}
     on:click={handleCanvasClick}
     class:grabbing={isDragging}
   ></canvas>
+  <div
+    bind:this={hoverRef}
+    class="hover-box"
+    style="--preview-color: {$selectedColor}80;"
+  ></div>
 </main>
 
 <style>
@@ -227,5 +250,24 @@
 
   canvas.grabbing {
     cursor: grabbing;
+  }
+
+  .hover-box {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    box-sizing: border-box;
+
+    border: 1px solid white;
+    box-shadow:
+      0 0 0 1px black inset,
+      0 0 0 1px black;
+
+    display: none;
+    z-index: 10;
+
+    will-change: transform;
+    background-color: var(--preview-color);
   }
 </style>

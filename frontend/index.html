@@ -2,11 +2,45 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <link rel="icon" type="image/svg+xml" href="/pen-line.svg" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+    <title>Pixel Canvas - Draw Together</title>
+    <meta name="theme-color" content="#1a1a1a" />
+    <meta name="description" content="A real-time, serverless pixel art canvas. Draw with the world!" />
+
+    <meta property="og:title" content="Pixel Canvas" />
+    <meta property="og:description" content="A real-time, serverless pixel art canvas. Draw with the world!" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/pen-line.svg" /> <style>
+      /* Prevents the "white flash" while Svelte loads,
+        stops Mac/iOS "bounce" scrolling, and blocks browser touch-zooming.
+      */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background-color: #1a1a1a;
+        overflow: hidden;
+        overscroll-behavior: none; /* Stops the elastic bounce effect */
+        touch-action: none; /* Forces the browser to hand all touch events to your JS engine */
+      }
+
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
   </head>
   <body>
+    <noscript>
+      <div style="color: white; text-align: center; padding: 2rem; font-family: sans-serif;">
+        You need to enable JavaScript to run this app.
+      </div>
+    </noscript>
+
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
   </body>

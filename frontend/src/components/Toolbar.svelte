@@ -75,6 +75,7 @@
     border-bottom: 4px solid black;
     padding-bottom: 5px;
     margin-bottom: 5px;
+    color: black;
   }
 
   h1 {
@@ -102,6 +103,7 @@
 
   .label {
     font-weight: bold;
+    color: black;
   }
 
   .color-picker-group {
