@@ -7,13 +7,18 @@ let socket = null;
 let reconnectTimer = null;
 
 export const connectWebSocket = (wsUrl) => {
-    if (!wsUrl || socket) return;
+  console.log("Connecting WebSocket to:", wsUrl);
+    if (!wsUrl || socket){
+      console.log("WebSocket already connected or URL not provided");
+      return;
+    }
 
     socket = new WebSocket(wsUrl);
 
     socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
+        console.log("WebSocket connected");
         isConnected.set(true);
         wsError.set(null);
         if (reconnectTimer) clearTimeout(reconnectTimer);

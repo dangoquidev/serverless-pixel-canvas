@@ -21,15 +21,19 @@
 
   onMount(() => {
     engine = new CanvasEngine(canvasRef, CANVAS_SIZE, CANVAS_SIZE, CHUNK_SIZE);
-    // Initial Positioning: Center the canvas
-    engine.viewX = window.innerWidth / 2 - (CANVAS_SIZE / 2) * engine.scale;
-    engine.viewY = window.innerHeight / 2 - (CANVAS_SIZE / 2) * engine.scale;
+    // 1. Set a high initial scale (Zoomed in)
+    engine.scale = 6;
 
+    // Formula: (ScreenCenter) - (TargetPixel * Scale)
+    engine.viewX = window.innerWidth / 2 - 500 * engine.scale;
+    engine.viewY = window.innerHeight / 2 - 500 * engine.scale;
+
+    // 3. Now refresh - this will only fetch chunks around the center
     refreshVisibleArea();
 
-    connectWebSocket(import.meta.env.VITE_WS_URL);
+    connectWebSocket(import.meta.env.VITE_WSS_URL);
     window.addEventListener("ws_binary_update", handleWSUpdate);
-    window.addEventListener("resize", refreshVisibleArea);
+    window.addEventListener("resize", handleResize);
   });
 
   onDestroy(() => {
@@ -39,6 +43,12 @@
   });
 
   // --- Data Handling ---
+
+  function handleResize() {
+    engine.canvas.width = window.innerWidth;
+    engine.canvas.height = window.innerHeight;
+    refreshVisibleArea();
+  }
 
   function handleWSUpdate(e) {
     const view = e.detail; // Uint8Array [CX, CY, LX, LY, R, G, B]
@@ -108,26 +118,10 @@
     };
   }
 
-  function handleMouseMove(e) {
-    if (isDragging) {
-      const dx = e.clientX - dragStart.x;
-      const dy = e.clientY - dragStart.y;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasDragged = true;
-      engine.viewX = dragStart.vx + dx;
-      engine.viewY = dragStart.vy + dy;
-      engine.render();
-    } else {
-      const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
-      if (x !== null) {
-        canvasRef.style.setProperty("--hover-x", `${x}`);
-        canvasRef.style.setProperty("--hover-y", `${y}`);
-      }
-    }
-  }
-
   function handleMouseUp() {
     if (isDragging) {
       isDragging = false;
+      clearTimeout(refreshTimeout);
       refreshVisibleArea();
     }
   }
@@ -151,18 +145,58 @@
       console.error(err);
     }
   }
+  let refreshTimeout;
+
+  /**
+   * Prevents spamming the API by waiting for the user to stop interacting
+   */
+  function debouncedRefresh() {
+    clearTimeout(refreshTimeout);
+    refreshTimeout = setTimeout(() => {
+      refreshVisibleArea();
+    }, 150);
+  }
 
   function handleWheel(e) {
     const zoomDir = e.deltaY > 0 ? 0.9 : 1.1;
-    engine.scale = Math.min(Math.max(0.5, engine.scale * zoomDir), 50);
+    const newScale = Math.min(Math.max(0.5, engine.scale * zoomDir), 50);
+    engine.scale = newScale;
+
     engine.render();
-    refreshVisibleArea();
+
+    debouncedRefresh();
+  }
+
+  function handleMouseMove(e) {
+    if (isDragging) {
+      const dx = e.clientX - dragStart.x;
+      const dy = e.clientY - dragStart.y;
+
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasDragged = true;
+
+      engine.viewX = dragStart.vx + dx;
+      engine.viewY = dragStart.vy + dy;
+      engine.render();
+
+      debouncedRefresh();
+    } else {
+      const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
+      if (x !== null) {
+        canvasRef.style.setProperty("--hover-x", `${x}`);
+        canvasRef.style.setProperty("--hover-y", `${y}`);
+        canvasRef.style.setProperty("--hover-display", "block");
+      } else {
+        canvasRef.style.setProperty("--hover-display", "none");
+      }
+    }
   }
 </script>
 
 <svelte:window on:mouseup={handleMouseUp} />
 
 <main
+  role="application"
+  aria-label="Pixel canvas"
   on:mousedown={handleMouseDown}
   on:mousemove={handleMouseMove}
   on:wheel|preventDefault={handleWheel}
