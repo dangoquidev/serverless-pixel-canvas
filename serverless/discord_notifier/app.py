@@ -1,7 +1,9 @@
 import json
 import os
-import urllib.request
+import time
+
 import boto3
+import requests
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities import parameters
 from aws_lambda_powertools.utilities.typing import LambdaContext
@@ -11,107 +13,122 @@ tracer = Tracer()
 
 s3 = boto3.client("s3")
 
+DISCORD_SECRET_NAME = os.environ.get("DISCORD_SECRET_NAME", "DiscordSecrets")
+DISCORD_API_BASE = "https://discord.com/api/v10"
+EXPIRATION_TIME = 1 * 24 * 60 * 60 # 1 days
+
 
 # --- Helper Functions ---
 
+def get_discord_secrets() -> dict:
+    """Fetches Discord secrets from Secrets Manager (cached by Powertools)."""
+    return parameters.get_secret(DISCORD_SECRET_NAME, transform="json")
+
 
 def get_discord_token_from_metadata(bucket_name: str, object_key: str) -> str | None:
-    """Fetches object metadata from S3 to retrieve the Discord interaction token."""
+    """Retrieves the Discord interaction token from S3 object metadata."""
     response = s3.head_object(Bucket=bucket_name, Key=object_key)
-    metadata = response.get("Metadata", {})
-    return metadata.get("discord_token")
+    return response.get("Metadata", {}).get("discord_token")
 
 
-def notify_discord(
-    discord_token: str, image_url: str, application_id: str
+def patch_deferred_message(
+    application_id: str,
+    interaction_token: str,
+    content: str,
 ) -> None:
-    """Updates the original Discord interaction message with the generated image URL."""
-    discord_url = f"https://discord.com/api/v10/webhooks/{application_id}/{discord_token}/messages/@original"
-    payload = {"content": f"Here is the current canvas snapshot! {image_url}"}
+    """
+    Edits the original deferred interaction response with the snapshot URL.
+    """
+    url = f"{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original"
+    payload = {"content": content}
+    headers = {"Content-Type": "application/json"}
 
-    req = urllib.request.Request(
-        discord_url,
-        data=json.dumps(payload).encode("utf-8"),
-        method="PATCH",
-        headers={"Content-Type": "application/json"},
+    response = requests.patch(url, json=payload, headers=headers, timeout=10)
+
+    if response.status_code >= 400:
+        logger.error(f"Discord API Error: {response.status_code} - {response.text}")
+
+    response.raise_for_status()
+
+
+def process_s3_record(record: dict, secrets: dict, correlation_id: str) -> bool:
+    """
+    Processes a single S3 ObjectCreated record. Returns True if successful.
+    """
+    bucket_name = record["s3"]["bucket"]["name"]
+    object_key = record["s3"]["object"]["key"]
+
+    discord_token = get_discord_token_from_metadata(bucket_name, object_key)
+    if not discord_token:
+        logger.warning(
+            "No discord_token in S3 metadata, skipping",
+            extra={"object_key": object_key},
+        )
+        return False
+
+    application_id = secrets.get("AppId", "")
+
+    if not application_id:
+        logger.error("AppId missing from DiscordSecrets")
+        raise ValueError("AppId required in DiscordSecrets")
+
+    image_url = s3.generate_presigned_url(
+        ClientMethod='get_object',
+        Params={
+            'Bucket': bucket_name,
+            'Key': object_key
+        },
+        ExpiresIn=EXPIRATION_TIME
     )
-    urllib.request.urlopen(req, timeout=5)
+
+    content = f"Here is the current canvas snapshot! {image_url}"
+
+    patch_deferred_message(
+        application_id=application_id,
+        interaction_token=discord_token,
+        content=content
+    )
+
+    logger.info("Successfully notified Discord", extra={"object_key": object_key})
+    return True
 
 
 # --- Main Handler ---
 
-
 @tracer.capture_lambda_handler
-@logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
-    """Main orchestrator for notifying Discord after snapshot creation."""
+@logger.inject_lambda_context(clear_state=True)
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
+    """Notifies Discord after a snapshot is uploaded to S3."""
     correlation_id = context.aws_request_id
-
-    discord_secrets = parameters.get_secret(
-        os.environ["DISCORD_SECRET_NAME"], transform="json"
-    )
-    application_id = discord_secrets.get("AppId", "")
+    logger.append_keys(correlation_id=correlation_id, function="discord_notifier")
 
     records = event.get("Records", [])
     if not records:
+        logger.info("No S3 records to process")
         return {"statusCode": 200, "body": "No records to process"}
 
+    secrets = get_discord_secrets()
     processed_count = 0
 
     for record in records:
-        object_key = "unknown"
+        object_key = record.get("s3", {}).get("object", {}).get("key", "unknown")
         try:
-            bucket_name = record["s3"]["bucket"]["name"]
-            object_key = record["s3"]["object"]["key"]
-
-            # 1. Fetch metadata
-            discord_token = get_discord_token_from_metadata(bucket_name, object_key)
-            if not discord_token:
-                logger.warning(
-                    json.dumps(
-                        {
-                            "function": "discord_notifier",
-                            "message": f"No discord_token found in metadata for {object_key}. Skipping.",
-                            "correlation_id": correlation_id,
-                            "object_key": object_key,
-                        }
-                    )
-                )
-                continue
-
-            # 2. Construct S3 URL
-            image_url = f"https://{bucket_name}.s3.amazonaws.com/{object_key}"
-
-            # 3. Notify Discord
-            notify_discord(discord_token, image_url, application_id)
-
-            logger.info(
-                json.dumps(
-                    {
-                        "function": "discord_notifier",
-                        "message": "Successfully notified Discord",
-                        "correlation_id": correlation_id,
-                        "object_key": object_key,
-                    }
-                )
-            )
-
-            processed_count += 1
-
-        except Exception as e:
+            if process_s3_record(record, secrets, correlation_id):
+                processed_count += 1
+        except requests.HTTPError as e:
             logger.error(
-                json.dumps(
-                    {
-                        "function": "discord_notifier",
-                        "message": f"Failed to process record for {object_key}",
-                        "error": str(e),
-                        "correlation_id": correlation_id,
-                        "object_key": object_key,
-                    }
-                )
+                "Discord API request failed",
+                extra={
+                    "object_key": object_key,
+                    "status_code": e.response.status_code if e.response else None,
+                },
             )
+            raise
+        except Exception as e:
+            logger.exception("Failed to process S3 record", extra={"object_key": object_key})
+            raise
 
     return {
         "statusCode": 200,
-        "body": f"Notification sent for {processed_count} records",
+        "body": json.dumps({"processed": processed_count}),
     }

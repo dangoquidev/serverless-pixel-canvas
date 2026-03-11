@@ -176,6 +176,20 @@ Resources:
   SnapshotWorkerQueue:
     Type: AWS::SQS::Queue
 
+  SnapshotWorkerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref SnapshotWorkerQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: "sns.amazonaws.com" }
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt SnapshotWorkerQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref PixelEventsTopic }
+
   SnapshotWorkerSubscription:
     Type: AWS::SNS::Subscription
     Properties:
