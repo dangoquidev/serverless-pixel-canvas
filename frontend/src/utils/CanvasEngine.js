@@ -16,19 +16,43 @@ export class CanvasEngine {
         this.viewY = 0;
     }
 
-    // --- Core Rendering ---
+    // --- Core Rendering & Data Parsing ---
 
-    updatePixel(x, y, r, g, b) {
+    /**
+     * Single Source of Truth for decoding the 7-byte binary protocol.
+     * Maps chunk and local coordinates to global canvas space.
+     * @param {Uint8Array} view - The raw byte array [CX, CY, LX, LY, R, G, B]
+     */
+    applyBinaryBuffer(view) {
+        for (let j = 0; j < view.length; j += 7) {
+            const globalX = view[j] * this.chunkSize + view[j + 2];
+            const globalY = view[j + 1] * this.chunkSize + view[j + 3];
+
+            this.updatePixel(globalX, globalY, view[j + 4], view[j + 5], view[j + 6]);
+        }
+    }
+
+    getPixel(x, y) {
+        if (x < 0 || x >= this.width || y < 0 || y >= this.height) return null;
+        const index = (y * this.width + x) * 4;
+        return {
+            r: this.imgData.data[index],
+            g: this.imgData.data[index + 1],
+            b: this.imgData.data[index + 2],
+            a: this.imgData.data[index + 3]
+        };
+    }
+
+    updatePixel(x, y, r, g, b, a = 255) {
         if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
         const index = (y * this.width + x) * 4;
         this.imgData.data[index] = r;
         this.imgData.data[index + 1] = g;
         this.imgData.data[index + 2] = b;
-        this.imgData.data[index + 3] = 255;
+        this.imgData.data[index + 3] = a;
     }
 
     render() {
-        // Step 1: Put the raw pixels onto the offscreen canvas memory
         // We use a temporary canvas to apply scaling/panning without blurring
         createImageBitmap(this.imgData).then(bitmap => {
             this.ctx.save();
@@ -41,7 +65,7 @@ export class CanvasEngine {
         });
     }
 
-    // --- Coordinate Math (Extracted from Svelte) ---
+    // --- Coordinate Math ---
 
     screenToPixel(clientX, clientY) {
         const rect = this.canvas.getBoundingClientRect();

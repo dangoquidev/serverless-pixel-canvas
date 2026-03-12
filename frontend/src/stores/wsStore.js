@@ -8,30 +8,34 @@ let reconnectTimer = null;
 
 export const connectWebSocket = (wsUrl) => {
   console.log("Connecting WebSocket to:", wsUrl);
-    if (!wsUrl || socket){
-      console.log("WebSocket already connected or URL not provided");
-      return;
-    }
+  if (!wsUrl || socket){
+    console.log("WebSocket already connected or URL not provided");
+    return;
+  }
 
-    socket = new WebSocket(wsUrl);
+  socket = new WebSocket(wsUrl);
+  socket.binaryType = "arraybuffer";
 
-    socket.binaryType = "arraybuffer";
+  socket.onopen = () => {
+      console.log("WebSocket connected");
+      isConnected.set(true);
+      wsError.set(null);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+  };
 
-    socket.onopen = () => {
-        console.log("WebSocket connected");
-        isConnected.set(true);
-        wsError.set(null);
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-    };
+  socket.onmessage = (event) => {
+  const binaryString = atob(event.data);
+  const len = binaryString.length;
+  const view = new Uint8Array(len);
 
-    socket.onmessage = (event) => {
+  for (let i = 0; i < len; i++) {
+      view[i] = binaryString.charCodeAt(i);
+  }
 
-        const view = new Uint8Array(event.data);
-
-        if (view.length > 0) {
-            window.dispatchEvent(new CustomEvent('ws_binary_update', { detail: view }));
-        }
-    };
+  if (view.length > 0) {
+      window.dispatchEvent(new CustomEvent('ws_binary_update', { detail: view }));
+  }
+};
 
     socket.onclose = () => {
         isConnected.set(false);

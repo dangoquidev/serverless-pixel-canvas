@@ -9,7 +9,7 @@
   import { connectWebSocket, disconnectWebSocket } from "../stores/wsStore.js";
   import { CanvasEngine } from "../utils/CanvasEngine.js";
 
-  // Constants
+  // --- Constants & State ---
   const CANVAS_SIZE = 1000;
   const CHUNK_SIZE = 100;
 
@@ -19,17 +19,17 @@
   let isDragging = false;
   let hasDragged = false;
   let dragStart = { x: 0, y: 0, vx: 0, vy: 0 };
+  let refreshTimeout;
 
+  // --- Lifecycle ---
   onMount(() => {
     engine = new CanvasEngine(canvasRef, CANVAS_SIZE, CANVAS_SIZE, CHUNK_SIZE);
-    // 1. Set a high initial scale (Zoomed in)
+
+    // Initial Zoom and Center
     engine.scale = 6;
+    engine.viewX = window.innerWidth / 2 - (CANVAS_SIZE / 2) * engine.scale;
+    engine.viewY = window.innerHeight / 2 - (CANVAS_SIZE / 2) * engine.scale;
 
-    // Formula: (ScreenCenter) - (TargetPixel * Scale)
-    engine.viewX = window.innerWidth / 2 - 500 * engine.scale;
-    engine.viewY = window.innerHeight / 2 - 500 * engine.scale;
-
-    // 3. Now refresh - this will only fetch chunks around the center
     refreshVisibleArea();
 
     connectWebSocket(import.meta.env.VITE_WSS_URL);
@@ -39,8 +39,9 @@
 
   onDestroy(() => {
     window.removeEventListener("ws_binary_update", handleWSUpdate);
-    window.removeEventListener("resize", refreshVisibleArea);
+    window.removeEventListener("resize", handleResize);
     disconnectWebSocket();
+    clearTimeout(refreshTimeout);
   });
 
   // --- Data Handling ---
@@ -52,58 +53,69 @@
   }
 
   function handleWSUpdate(e) {
-    const view = e.detail; // Uint8Array [CX, CY, LX, LY, R, G, B]
-    for (let i = 0; i < view.length; i += 7) {
-      const gx = view[i] * CHUNK_SIZE + view[i + 2];
-      const gy = view[i + 1] * CHUNK_SIZE + view[i + 3];
-      engine.updatePixel(gx, gy, view[i + 4], view[i + 5], view[i + 6]);
-    }
+    engine.applyBinaryBuffer(e.detail);
     engine.render();
   }
 
   async function refreshVisibleArea() {
-    const { minCx, minCy, maxCx, maxCy } = engine.getVisibleChunks(
+    const visibleBounds = engine.getVisibleChunks(
       window.innerWidth,
       window.innerHeight,
     );
-    let chunksToFetch = [];
+    const chunksToFetch = getUnloadedChunks(visibleBounds);
+
+    if (chunksToFetch.length === 0) {
+      engine.render();
+      return;
+    }
+
+    await loadChunksInBatches(chunksToFetch, 4);
+  }
+
+  function getUnloadedChunks({ minCx, minCy, maxCx, maxCy }) {
+    const missingChunks = [];
 
     loadedChunks.update((set) => {
       for (let cx = minCx; cx <= maxCx; cx++) {
         for (let cy = minCy; cy <= maxCy; cy++) {
-          if (!set.has(`${cx},${cy}`)) {
-            set.add(`${cx},${cy}`);
-            chunksToFetch.push({ cx, cy });
+          const chunkId = `${cx},${cy}`;
+          if (!set.has(chunkId)) {
+            set.add(chunkId);
+            missingChunks.push({ cx, cy });
           }
         }
       }
       return set;
     });
 
-    if (chunksToFetch.length > 0) {
-      // Load in batches of 4 to prevent AWS Lambda throttling
-      for (let i = 0; i < chunksToFetch.length; i += 4) {
-        const batch = chunksToFetch.slice(i, i + 4);
-        await Promise.all(
-          batch.map(async ({ cx, cy }) => {
+    return missingChunks;
+  }
+
+  // --- Network & Rendering ---
+  async function loadChunksInBatches(chunks, batchSize = 4) {
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+
+      await Promise.all(
+        batch.map(async ({ cx, cy }) => {
+          try {
             const buffer = await fetchChunk(cx, cy);
-            const view = new Uint8Array(buffer);
-            for (let j = 0; j < view.length; j += 5) {
-              engine.updatePixel(
-                cx * CHUNK_SIZE + view[j],
-                cy * CHUNK_SIZE + view[j + 1],
-                view[j + 2],
-                view[j + 3],
-                view[j + 4],
-              );
-            }
-          }),
-        );
-        engine.render();
-      }
-    } else {
+            engine.applyBinaryBuffer(new Uint8Array(buffer));
+          } catch (error) {
+            console.error(`Failed to fetch chunk ${cx},${cy}`, error);
+          }
+        }),
+      );
+
       engine.render();
     }
+  }
+
+  function debouncedRefresh() {
+    clearTimeout(refreshTimeout);
+    refreshTimeout = setTimeout(() => {
+      refreshVisibleArea();
+    }, 150);
   }
 
   // --- Interaction Handlers ---
@@ -122,8 +134,7 @@
   function handleMouseUp() {
     if (isDragging) {
       isDragging = false;
-      clearTimeout(refreshTimeout);
-      refreshVisibleArea();
+      debouncedRefresh(); // Only fetch new chunks when the user stops dragging
     }
   }
 
@@ -136,44 +147,55 @@
     const color = $selectedColor;
     const { r, g, b } = engine.hexToRgb(color);
 
-    engine.updatePixel(x, y, r, g, b);
-    engine.render();
+    const previousPixel = engine.getPixel(x, y);
 
+    engine.updatePixel(x, y, r, g, b, 100);
+    engine.render();
     pixelsRemaining.update((n) => n - 1);
 
     try {
       await drawPixel(x, y, color);
     } catch (err) {
-      console.error(err);
+      console.error("Failed to draw pixel:", err);
 
       pixelsRemaining.update((n) => n + 1);
+
+      if (previousPixel) {
+        engine.updatePixel(
+          x,
+          y,
+          previousPixel.r,
+          previousPixel.g,
+          previousPixel.b,
+          previousPixel.a,
+        );
+        engine.render();
+      }
     }
-  }
-
-  let refreshTimeout;
-
-  /**
-   * Prevents spamming the API by waiting for the user to stop interacting
-   */
-  function debouncedRefresh() {
-    clearTimeout(refreshTimeout);
-    refreshTimeout = setTimeout(() => {
-      refreshVisibleArea();
-    }, 150);
   }
 
   function handleWheel(e) {
     const ZOOM_SPEED = 0.002;
-
     const zoomFactor = Math.exp(-e.deltaY * ZOOM_SPEED);
+    const oldScale = engine.scale;
+    const newScale = Math.min(Math.max(0.5, oldScale * zoomFactor), 50);
 
-    const newScale = Math.min(Math.max(0.5, engine.scale * zoomFactor), 50);
+    // Zoom Math Fix: Calculate world pixel under mouse *before* zoom
+    const mouseX = e.clientX;
+    const mouseY = e.clientY;
+    const worldX = (mouseX - engine.viewX) / oldScale;
+    const worldY = (mouseY - engine.viewY) / oldScale;
 
+    // Apply new scale
     engine.scale = newScale;
+
+    // Adjust view so the same world pixel stays under the mouse cursor
+    engine.viewX = mouseX - worldX * newScale;
+    engine.viewY = mouseY - worldY * newScale;
+
     engine.render();
 
     if (hoverRef) hoverRef.style.display = "none";
-
     debouncedRefresh();
   }
 
@@ -189,8 +211,6 @@
       engine.render();
 
       if (hoverRef) hoverRef.style.display = "none";
-
-      debouncedRefresh();
     } else {
       const { x, y } = engine.screenToPixel(e.clientX, e.clientY);
 
@@ -199,10 +219,8 @@
         const screenY = engine.viewY + y * engine.scale;
 
         hoverRef.style.transform = `translate(${screenX}px, ${screenY}px)`;
-
         hoverRef.style.width = `${engine.scale}px`;
         hoverRef.style.height = `${engine.scale}px`;
-
         hoverRef.style.display = "block";
       } else if (hoverRef) {
         hoverRef.style.display = "none";
@@ -241,32 +259,26 @@
     overflow: hidden;
     touch-action: none;
   }
-
   canvas {
     display: block;
     image-rendering: pixelated;
     cursor: crosshair;
   }
-
   canvas.grabbing {
     cursor: grabbing;
   }
-
   .hover-box {
     position: absolute;
     top: 0;
     left: 0;
     pointer-events: none;
     box-sizing: border-box;
-
     border: 1px solid white;
     box-shadow:
       0 0 0 1px black inset,
       0 0 0 1px black;
-
     display: none;
     z-index: 10;
-
     will-change: transform;
     background-color: var(--preview-color);
   }
