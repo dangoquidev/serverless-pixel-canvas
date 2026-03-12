@@ -82,9 +82,13 @@ def handle_async_command(command_name: str, body: dict, data: dict) -> dict:
         "payload": data,
     }
 
-    sns_client.publish(TopicArn=SNS_TOPIC_ARN, Message=json.dumps(event_payload), MessageAttributes={
+    sns_client.publish(
+        TopicArn=SNS_TOPIC_ARN,
+        Message=json.dumps(event_payload),
+        MessageAttributes={
             "action": {"DataType": "String", "StringValue": command_name}
-        })
+        },
+    )
 
     return {"type": ResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE}
 

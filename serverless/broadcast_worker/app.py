@@ -1,3 +1,4 @@
+import base64
 import os
 import json
 import boto3
@@ -94,7 +95,9 @@ def fetch_active_connections() -> list[str]:
 def broadcast_to_client(connection_id: str, payload: bytearray) -> str | None:
     """Sends binary data to a single WS client. Returns connection_id if stale."""
     try:
-        apigw_client.post_to_connection(ConnectionId=connection_id, Data=payload)
+        b64_payload = base64.b64encode(payload).decode("utf-8")
+
+        apigw_client.post_to_connection(ConnectionId=connection_id, Data=b64_payload)
         return None
     except ClientError as e:
         if e.response["Error"]["Code"] == "GoneException":

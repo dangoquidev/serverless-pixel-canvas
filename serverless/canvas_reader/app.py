@@ -6,7 +6,6 @@ from boto3.dynamodb.conditions import Key
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-# IMPORT FROM YOUR BRAND NEW LAYER!
 from canvas_utils import build_binary_array
 
 logger = Logger()
@@ -15,11 +14,8 @@ tracer = Tracer()
 dynamodb = boto3.resource("dynamodb")
 canvas_table = dynamodb.Table(os.environ.get("CANVAS_TABLE_NAME"))
 
-# --- Helper Functions ---
-
 
 def build_error_response(status_code: int, message: str) -> dict:
-    """Helper for returning standard JSON errors."""
     return {
         "statusCode": status_code,
         "headers": {
@@ -31,7 +27,6 @@ def build_error_response(status_code: int, message: str) -> dict:
 
 
 def build_success_response(binary_array: bytearray) -> dict:
-    """Helper for returning standard binary responses."""
     return {
         "statusCode": 200,
         "headers": {
@@ -46,13 +41,12 @@ def build_success_response(binary_array: bytearray) -> dict:
 
 @tracer.capture_method
 def fetch_chunk_minified(cx: int, cy: int) -> list:
-    """Fetches minified pixels, reducing RCU usage and memory by over 60%."""
     items = []
     chunk_id = f"{cx}#{cy}"
 
     query_params = {
         "KeyConditionExpression": Key("c").eq(chunk_id),
-        "ProjectionExpression": "p, co",
+        "ProjectionExpression": "c, p, co",
     }
 
     response = canvas_table.query(**query_params)
@@ -86,7 +80,6 @@ def lambda_handler(event: dict, context: LambdaContext):
         logger.info("Chunk loaded", chunk_x=cx, chunk_y=cy, count=len(items))
 
         binary_array = build_binary_array(items)
-
         return build_success_response(binary_array)
 
     except Exception:
