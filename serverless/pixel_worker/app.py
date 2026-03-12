@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime, timezone
 import boto3
+from boto3.session import Config
 from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
@@ -13,7 +14,11 @@ logger = Logger()
 tracer = Tracer()
 
 # --- Cold Start: SDK Initialization ---
-dynamodb = boto3.resource("dynamodb")
+boto_config = Config(
+    retries={"max_attempts": 3, "mode": "standard"}, max_pool_connections=50
+)
+
+dynamodb = boto3.resource("dynamodb", config=boto_config)
 canvas_table = dynamodb.Table(os.environ.get("CANVAS_TABLE_NAME"))
 rate_limit_table = dynamodb.Table(os.environ.get("RATE_LIMIT_TABLE_NAME"))
 

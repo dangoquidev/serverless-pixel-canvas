@@ -361,6 +361,7 @@ Resources:
     Properties:
       CodeUri: serverless/pixel_worker/
       Handler: app.lambda_handler
+      MemorySize: 512
       Layers:
         - !Ref CanvasUtilsLayer
       Environment:
@@ -377,7 +378,7 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt PixelWorkerQueue.Arn
-            BatchSize: 10
+            BatchSize: 100
             MaximumBatchingWindowInSeconds: 1
 
   DlqProcessorFunction:
@@ -404,6 +405,7 @@ Resources:
     Properties:
       CodeUri: serverless/broadcast_worker/
       Handler: app.lambda_handler
+      MemorySize: 512
       Layers:
         - !Ref CanvasUtilsLayer
       Environment:
@@ -422,8 +424,8 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt BroadcastWorkerQueue.Arn
-            BatchSize: 10
-            MaximumBatchingWindowInSeconds: 1
+            BatchSize: 30
+            MaximumBatchingWindowInSeconds: 3
 
   WebSocketManagerFunction:
     Type: AWS::Serverless::Function
