@@ -104,7 +104,7 @@ def create_response(status_code: int, body: dict | str) -> dict:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context(clear_state=True)
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     logger.append_keys(correlation_id=context.aws_request_id, function="discord_proxy")
 
     verify_key = get_verify_key()
@@ -145,6 +145,12 @@ def lambda_handler(event: dict, context: LambdaContext):
     except json.JSONDecodeError:
         logger.error("Failed to parse request body")
         return create_response(400, "Invalid JSON body")
+    except BadSignatureError as e:
+        logger.warning("Signature verification failed", extra={"error": str(e)})
+        return create_response(401, "Invalid signature")
+    except ValueError as e:
+        logger.warning("Invalid request format", extra={"error": str(e)})
+        return create_response(400, "Invalid request format")
     except Exception as e:
-        logger.exception("Internal server error")
+        logger.exception("Unexpected server error", extra={"error": str(e)})
         return create_response(500, "Internal server error")

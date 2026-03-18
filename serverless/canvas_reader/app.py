@@ -55,7 +55,7 @@ def fetch_chunk_pixels(chunk_id: str) -> list:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
 
     query_params = event.get("queryStringParameters") or {}
     try:
