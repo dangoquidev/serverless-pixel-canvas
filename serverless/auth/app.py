@@ -111,7 +111,7 @@ def build_discord_redirect_response(event: dict, client_id: str) -> dict:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     query_params = event.get("queryStringParameters") or {}
     code = query_params.get("code")
 
@@ -142,11 +142,15 @@ def lambda_handler(event: dict, context: LambdaContext):
         logger.info("Authentication successful", extra={"user_id": user_data.get("id")})
         return build_redirect_response(f"token={app_token}")
 
+    except requests.exceptions.Timeout as e:
+        logger.warning("Discord API timeout", extra={"error": str(e)})
+        return build_redirect_response("error=discord_timeout")
     except requests.exceptions.RequestException as e:
         logger.error("Discord API communication failure", extra={"error": str(e)})
         return build_redirect_response("error=discord_api_failure")
-    except ValueError:
+    except ValueError as e:
+        logger.warning("Configuration or parsing error", extra={"error": str(e)})
         return build_redirect_response("error=internal_configuration_error")
-    except Exception:
-        logger.exception("Uncaught authentication error")
+    except Exception as e:
+        logger.exception("Uncaught authentication error", extra={"error": str(e)})
         return build_redirect_response("error=internal_error")

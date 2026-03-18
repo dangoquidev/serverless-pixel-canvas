@@ -68,7 +68,7 @@ def extract_token(event: dict) -> str:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     correlation_id = str(uuid.uuid4())
     method_arn = event.get("methodArn", "")
 
