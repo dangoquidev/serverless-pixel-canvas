@@ -12,9 +12,11 @@ tracer = Tracer()
 # 2. Initialization (Cold Start Optimization)
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
+sns = boto3.client("sns")
 
 CANVAS_TABLE_NAME = os.environ.get("CANVAS_TABLE_NAME")
 SNAPSHOT_BUCKET = os.environ.get("SNAPSHOT_BUCKET")
+SNAPSHOT_COMPLETE_TOPIC = os.environ.get("SNAPSHOT_COMPLETE_TOPIC")
 canvas_table = dynamodb.Table(CANVAS_TABLE_NAME)
 
 CANVAS_WIDTH = 1000
@@ -63,15 +65,16 @@ def generate_image(pixels: list, file_path: str) -> None:
     img.save(file_path)
 
 
-def upload_snapshot_to_s3(file_path: str, request_id: str, discord_token: str) -> str:
-    """Uploads the generated image to S3 with Discord interaction token in metadata."""
+def upload_snapshot_to_s3(file_path: str, request_id: str) -> str:
+    """Uploads the generated image to S3.
+    
+    Note: Metadata (like discord_token) is no longer stored here.
+    Instead, it's passed directly via SNS event published by publish_snapshot_completion().
+    This avoids discord_notifier needing to make head_object calls.
+    """
     object_key = f"snapshots/snapshot_{request_id}.png"
 
     extra_args = {"ContentType": "image/png"}
-    if discord_token:
-        # discord_notifier needs this to patch the deferred Discord message
-        extra_args["Metadata"] = {"discord_token": discord_token}
-
     s3.upload_file(
         file_path,
         SNAPSHOT_BUCKET,
@@ -81,12 +84,44 @@ def upload_snapshot_to_s3(file_path: str, request_id: str, discord_token: str) -
     return object_key
 
 
+def publish_snapshot_completion(object_key: str, discord_token: str, pixel_count: int, correlation_id: str):
+    """Publishes snapshot completion event to SNS.
+    
+    This avoids discord_notifier needing to call S3 head_object to retrieve metadata.
+    The token and metadata are sent directly via the event.
+    """
+    if not SNAPSHOT_COMPLETE_TOPIC:
+        logger.warning("SNAPSHOT_COMPLETE_TOPIC not configured, skipping completion event")
+        return
+    
+    try:
+        sns.publish(
+            TopicArn=SNAPSHOT_COMPLETE_TOPIC,
+            Subject="Snapshot Generation Complete",
+            Message=json.dumps({
+                "action": "snapshot_complete",
+                "object_key": object_key,
+                "discord_token": discord_token,
+                "pixel_count": pixel_count,
+                "correlation_id": correlation_id,
+            }),
+        )
+    except Exception as e:
+        logger.error(
+            json.dumps({
+                "message": "Failed to publish snapshot completion event",
+                "error": str(e),
+                "object_key": object_key,
+            })
+        )
+
+
 # --- Main Handler ---
 
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     """Main orchestrator for generating canvas snapshots."""
     correlation_id = context.aws_request_id
 
@@ -124,9 +159,10 @@ def lambda_handler(event: dict, context: LambdaContext):
             generate_image(pixels, file_path)
 
             # 3. Upload to S3
-            object_key = upload_snapshot_to_s3(
-                file_path, context.aws_request_id, discord_token
-            )
+            object_key = upload_snapshot_to_s3(file_path, context.aws_request_id)
+
+            # 4. Publish completion event (for discord_notifier to use without head_object)
+            publish_snapshot_completion(object_key, discord_token, len(pixels), correlation_id)
 
             # Clean up local file
             if os.path.exists(file_path):

@@ -30,7 +30,7 @@ def handle_disconnect(connection_id: str) -> None:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     """Main orchestrator for managing WebSocket connections."""
     correlation_id = context.aws_request_id
 

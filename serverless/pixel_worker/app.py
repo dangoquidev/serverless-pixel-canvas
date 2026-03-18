@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
@@ -29,13 +30,17 @@ def _parse_sqs_record(record: dict) -> dict:
 
 
 def _is_valid_payload(payload: dict) -> bool:
-    """Returns True only if all required pixel fields are present."""
-    return bool(
-        payload.get("user_id")
-        and "x" in payload
-        and "y" in payload
-        and "color" in payload
-    )
+    """Returns True only if all required pixel fields are present and valid."""
+    if not (payload.get("user_id") and "x" in payload and "y" in payload and "color" in payload):
+        return False
+    
+    # Validate color is valid hex format (#RRGGBB)
+    color = payload.get("color")
+    if not re.match(r"^#[0-9A-Fa-f]{6}$", color):
+        logger.warning("Invalid color hex format", extra={"color": color})
+        return False
+    
+    return True
 
 
 @tracer.capture_method
@@ -124,7 +129,7 @@ def _process_record(record: dict, correlation_id: str) -> bool:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     """Processes pixel draw events arriving via SQS from the SNS fanout."""
     records = event.get("Records", [])
     if not records:
