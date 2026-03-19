@@ -5,6 +5,7 @@
     cooldownRemaining,
     loadedChunks,
   } from "../stores/canvasStore.js";
+  import { isOffline, queueSize } from "../stores/offlineStore.js";
   import { fetchChunk, drawPixel } from "../utils/api.js";
 
   const CANVAS_WIDTH = 1000;
@@ -37,11 +38,20 @@
     calculateVisibleChunks();
 
     window.addEventListener("pixel_batch_update", handleLiveUpdate);
+    window.addEventListener("resize", handleWindowResize);
   });
 
   onDestroy(() => {
     window.removeEventListener("pixel_batch_update", handleLiveUpdate);
+    window.removeEventListener("resize", handleWindowResize);
   });
+
+  // --- Window Resize Handler ---
+
+  function handleWindowResize() {
+    // Recalculate visible chunks when window resizes since viewport changed
+    calculateVisibleChunks();
+  }
 
   // --- Optimized Rendering ---
 
@@ -211,6 +221,13 @@
 
 <svelte:window on:mouseup={stopPan} on:mouseleave={stopPan} />
 
+<!-- Offline Status Indicator -->
+{#if $isOffline}
+  <div class="offline-indicator">
+    📡 Offline | Queued: {$queueSize}
+  </div>
+{/if}
+
 <div
   class="canvas-container"
   on:wheel|preventDefault={handleWheel}
@@ -233,6 +250,26 @@
 </div>
 
 <style>
+  .offline-indicator {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    background-color: rgba(255, 152, 0, 0.9);
+    color: white;
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-weight: bold;
+    font-size: 14px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    animation: pulse-glow 2s infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
   .canvas-container {
     width: 100vw;
     height: 100vh;
