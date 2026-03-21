@@ -90,6 +90,30 @@ To allow Discord to send `/draw` commands to your `discord_proxy` Lambda:
 - Set the **Interactions Endpoint URL** to:
   `<RestApiURL>/discord/interactions`
 
+### 3. Configure CORS for Production
+**IMPORTANT:** The backend API currently defaults to allowing requests from ANY origin (`*`). This is convenient for development but **NOT SECURE FOR PRODUCTION**.
+
+Before deploying to production, re-deploy the stack with a restricted CORS origin:
+```bash
+sam deploy \
+  --parameter-overrides AllowedOrigin="'https://your-frontend-domain.com'" \
+  --stack-name pixel-canvas-stack \
+  --region us-east-1
+```
+
+**For local development** with the default CloudFront domain:
+```bash
+# After initial deployment, capture your FrontendWebsiteURL (e.g., https://dXXXXX.cloudfront.net)
+sam deploy \
+  --parameter-overrides AllowedOrigin="'https://dXXXXX.cloudfront.net'" \
+  --stack-name pixel-canvas-stack \
+  --region us-east-1
+```
+
+**Multi-origin CORS:** If you need to support multiple origins (e.g., dev, staging, production), you can:
+- Deploy with a custom Lambda authorizer that validates origins in code
+- Or maintain separate stacks for each environment
+
 ---
 
 ## Phase 4: Deploying the Frontend (Svelte)
