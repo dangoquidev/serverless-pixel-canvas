@@ -46,12 +46,15 @@ export const connectWebSocket = (wsUrl) => {
         console.log("WebSocket disconnected. Reconnecting in 3s...");
         socket = null;
 
-        // Auto-reconnect
-        if (!reconnectTimer) {
-            reconnectTimer = setTimeout(() => {
-                connectWebSocket(wsUrl);
-            }, 3000);
+        // Auto-reconnect: Clear existing timer before creating new one to prevent leaks
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
         }
+        
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null; // Clear timer reference when it fires
+            connectWebSocket(wsUrl);
+        }, 3000);
     };
 
     socket.onerror = (error) => {
