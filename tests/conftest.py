@@ -49,12 +49,12 @@ def dynamodb_mock():
     dynamodb.create_table(
         TableName=os.environ["CANVAS_TABLE_NAME"],
         KeySchema=[
-            {"AttributeName": "ChunkId", "KeyType": "HASH"},
-            {"AttributeName": "PixelId", "KeyType": "RANGE"}
+            {"AttributeName": "c", "KeyType": "HASH"},
+            {"AttributeName": "p", "KeyType": "RANGE"}
         ],
         AttributeDefinitions=[
-            {"AttributeName": "ChunkId", "AttributeType": "S"},
-            {"AttributeName": "PixelId", "AttributeType": "S"}
+            {"AttributeName": "c", "AttributeType": "S"},
+            {"AttributeName": "p", "AttributeType": "N"}
         ],
         BillingMode="PAY_PER_REQUEST"
     )
@@ -78,9 +78,19 @@ def dynamodb_mock():
             {"AttributeName": "ConnectionId", "KeyType": "HASH"}
         ],
         AttributeDefinitions=[
-            {"AttributeName": "ConnectionId", "AttributeType": "S"}
+            {"AttributeName": "ConnectionId", "AttributeType": "S"},
+            {"AttributeName": "LiveStatus", "AttributeType": "S"}
         ],
-        BillingMode="PAY_PER_REQUEST"
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": "LiveStatusIndex",
+                "KeySchema": [{"AttributeName": "LiveStatus", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+                "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+            }
+        ],
+        BillingMode="PROVISIONED",
+        ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
     )
 
     yield dynamodb

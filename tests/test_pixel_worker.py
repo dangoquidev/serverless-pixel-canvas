@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+from decimal import Decimal
 
 # We import the Lambda handler after conftest.py has set up the mock environment vars
 from tests.conftest import MockLambdaContext
@@ -36,19 +37,20 @@ def test_pixel_worker_processes_valid_message(dynamodb_mock):
     
     table = dynamodb_mock.Table(os.environ["CANVAS_TABLE_NAME"])
     
-    # Chunk ID should be 150//100 = 1, 250//100 = 2
-    chunk_id = "CHUNK#1#2"
+    # Chunk ID should be 150//100 = 1, 250//100 = 2 -> "1#2"
+    chunk_id = "1#2"
     
     db_response = table.query(
-        KeyConditionExpression="ChunkId = :c",
+        KeyConditionExpression="c = :c",
         ExpressionAttributeValues={":c": chunk_id}
     )
     
     items = db_response.get("Items", [])
     assert len(items) == 1
-    assert items[0]["PixelId"] == "PIXEL#150#250"
-    assert items[0]["color"] == "#FF0000"
-    assert items[0]["author_id"] == "test_user_123"
+    # Position = local_y * CHUNK_SIZE + local_x = (250 % 100) * 100 + (150 % 100) = 50 * 100 + 50 = 5050
+    assert items[0]["p"] == Decimal("5050")
+    assert items[0]["co"] == Decimal("16711680")  # #FF0000 as integer
+    assert items[0]["u"] == "test_user_123"  # Minified user_id key
 
 def test_pixel_worker_enforces_rate_limit(dynamodb_mock, caplog):
     """Test that submitting more than 20 requests per minute rejects the pixels."""
