@@ -14,16 +14,12 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL")
 
 def get_discord_secrets() -> dict:
     """Fetches Discord secrets from Secrets Manager (cached 5 min by Powertools)."""
-    return parameters.get_secret(
-        os.environ["DISCORD_SECRET_NAME"], transform="json"
-    )
+    return parameters.get_secret(os.environ["DISCORD_SECRET_NAME"], transform="json")
 
 
 def get_jwt_secret() -> str:
     """Fetches JWT secret from Secrets Manager (cached 5 min by Powertools)."""
-    app_secrets = parameters.get_secret(
-        os.environ["APP_SECRET_NAME"], transform="json"
-    )
+    app_secrets = parameters.get_secret(os.environ["APP_SECRET_NAME"], transform="json")
     return app_secrets.get("JwtSecret", "")
 
 

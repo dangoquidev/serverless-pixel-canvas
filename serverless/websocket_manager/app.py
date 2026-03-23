@@ -17,7 +17,9 @@ connections_table = dynamodb.Table(CONNECTIONS_TABLE_NAME)
 
 def handle_connect(connection_id: str) -> None:
     """Saves the new WebSocket connection to DynamoDB."""
-    connections_table.put_item(Item={"ConnectionId": connection_id})
+    connections_table.put_item(
+        Item={"ConnectionId": connection_id, "LiveStatus": "ACTIVE"}
+    )
 
 
 def handle_disconnect(connection_id: str) -> None:

@@ -1,30 +1,37 @@
 <script>
-  import { cooldownRemaining } from "../stores/canvasStore.js";
+  import { pixelsRemaining } from "../stores/canvasStore.js";
   import { onMount } from "svelte";
+
+  const MAX_PIXELS = 20;
+  const REFILL_SECONDS = 3;
 
   let displayString = "READY";
   let isCooling = false;
+  let secondsUntilNext = REFILL_SECONDS;
 
-  // Reactively update when cooldownRemaining store changes
-  $: {
-    if ($cooldownRemaining > 0) {
-      isCooling = true;
-    }
-  }
+  $: isCooling = $pixelsRemaining <= 0;
 
-  // Local tick for the UI timer so we don't pound the Svelte store
   onMount(() => {
     const interval = setInterval(() => {
-      if ($cooldownRemaining > 0) {
-        cooldownRemaining.update((v) => Math.max(0, v - 100)); // decrease by 100ms
+      if ($pixelsRemaining < MAX_PIXELS) {
+        secondsUntilNext -= 1;
 
-        const secs = Math.ceil($cooldownRemaining / 1000);
-        displayString = `WAIT: ${secs}s`;
+        if (secondsUntilNext <= 0) {
+          pixelsRemaining.update((n) => Math.min(MAX_PIXELS, n + 1));
+          secondsUntilNext = REFILL_SECONDS;
+        }
       } else {
-        isCooling = false;
-        displayString = "READY TO DRAW";
+        secondsUntilNext = REFILL_SECONDS;
       }
-    }, 100);
+
+      if ($pixelsRemaining === MAX_PIXELS) {
+        displayString = `20 PIXELS (MAX)`;
+      } else if ($pixelsRemaining > 0) {
+        displayString = `${$pixelsRemaining} LEFT (+1 in ${secondsUntilNext}s)`;
+      } else {
+        displayString = `WAIT: ${secondsUntilNext}s`;
+      }
+    }, 1000);
 
     return () => clearInterval(interval);
   });
@@ -39,14 +46,15 @@
     position: fixed;
     top: 20px;
     right: 20px;
-    background: #00ff00;
+    background: white;
+    color: black;
     padding: 10px 20px;
     z-index: 100;
     transition: background-color 0.2s;
   }
 
   .cooldown-tracker.cooling {
-    background: var(--accent-color);
+    background: var(--accent-color, #ff4444);
     color: white;
     animation: shake 0.5s;
   }

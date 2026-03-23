@@ -4,20 +4,24 @@ import time
 import re
 from datetime import datetime, timezone
 import boto3
+from boto3.session import Config
 from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
+
+from canvas_utils import build_pixel_item, CHUNK_SIZE, MAX_PIXELS_PER_MINUTE
 
 logger = Logger()
 tracer = Tracer()
 
 # --- Cold Start: SDK Initialization ---
-dynamodb = boto3.resource("dynamodb")
+boto_config = Config(
+    retries={"max_attempts": 3, "mode": "standard"}, max_pool_connections=50
+)
+
+dynamodb = boto3.resource("dynamodb", config=boto_config)
 canvas_table = dynamodb.Table(os.environ.get("CANVAS_TABLE_NAME"))
 rate_limit_table = dynamodb.Table(os.environ.get("RATE_LIMIT_TABLE_NAME"))
-
-CHUNK_SIZE = 100
-MAX_PIXELS_PER_MINUTE = 20
 
 # --- Helper Functions ---
 
@@ -71,19 +75,10 @@ def check_rate_limit(user_id: str) -> bool:
 
 
 def save_pixel(x: int, y: int, color: str, user_id: str) -> None:
-    """Calculates the chunk partition key and persists the pixel to DynamoDB."""
-    chunk_x = x // CHUNK_SIZE
-    chunk_y = y // CHUNK_SIZE
+    """Persists the formatted minified pixel to DynamoDB."""
+    pixel_item = build_pixel_item(x, y, color, user_id)
 
-    canvas_table.put_item(
-        Item={
-            "ChunkId": f"CHUNK#{chunk_x}#{chunk_y}",
-            "PixelId": f"PIXEL#{x}#{y}",
-            "color": color,
-            "author_id": user_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    canvas_table.put_item(Item=pixel_item)
 
 
 def _process_record(record: dict, correlation_id: str) -> bool:

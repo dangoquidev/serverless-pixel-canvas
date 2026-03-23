@@ -13,9 +13,7 @@ tracer = Tracer()
 
 def get_jwt_secret() -> str:
     """Fetches JWT secret from Secrets Manager (cached 5 min by Powertools)."""
-    app_secrets = parameters.get_secret(
-        os.environ["APP_SECRET_NAME"], transform="json"
-    )
+    app_secrets = parameters.get_secret(os.environ["APP_SECRET_NAME"], transform="json")
     return app_secrets.get("JwtSecret", "")
 
 
@@ -93,7 +91,11 @@ def lambda_handler(event: dict, context: LambdaContext) -> dict:
 
         logger.info(
             "User successfully authorized",
-            extra={"user_id": user_id, "username": username, "correlation_id": correlation_id},
+            extra={
+                "user_id": user_id,
+                "username": username,
+                "correlation_id": correlation_id,
+            },
         )
 
         return generate_policy(user_id, "Allow", method_arn, user_id=user_id)
