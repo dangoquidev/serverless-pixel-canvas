@@ -77,23 +77,27 @@ def test_pixel_event_from_web_proxy_to_pixel_worker(dynamodb_mock):
     assert sns_message["userId"] == "user_123"
 
     # Simulate pixel_worker processing
-    chunk_id = f"0#{sns_message['x']//100}#{sns_message['y']//100}"
-    pixel_id = f"{chunk_id}#{sns_message['x']}#{sns_message['y']}"
+    cx = sns_message['x'] // 100
+    cy = sns_message['y'] // 100
+    chunk_id = f"{cx}#{cy}"
+    lx = sns_message['x'] % 100
+    ly = sns_message['y'] % 100
+    position = ly * 100 + lx
     
     canvas_table.put_item(
         Item={
-            "ChunkId": chunk_id,
-            "PixelId": pixel_id,
-            "color": sns_message["color"],
-            "userId": sns_message["userId"],
-            "timestamp": 1703001234,
+            "c": chunk_id,
+            "p": position,
+            "co": int(sns_message["color"].lstrip("#"), 16),
+            "u": sns_message["userId"],
+            "t": 1703001234,
         }
     )
 
     # Verify pixel was written to DynamoDB
-    response = canvas_table.get_item(Key={"ChunkId": chunk_id, "PixelId": pixel_id})
+    response = canvas_table.get_item(Key={"c": chunk_id, "p": position})
     assert "Item" in response
-    assert response["Item"]["color"] == "#FF5733"
+    assert response["Item"]["co"] == int("#FF5733".lstrip("#"), 16)
 
 
 # ==========================================
@@ -166,16 +170,15 @@ def test_snapshot_workflow_with_completion_event(dynamodb_mock):
     canvas_table = dynamodb_mock.Table(os.environ["CANVAS_TABLE_NAME"])
 
     # Add some pixels
-    chunk_id = "0#0#0"
+    chunk_id = "0#0"
     for i in range(10):
-        pixel_id = f"{chunk_id}#{i}#{i}"
         canvas_table.put_item(
             Item={
-                "ChunkId": chunk_id,
-                "PixelId": pixel_id,
-                "color": "#FF5733",
-                "userId": "user_123",
-                "timestamp": 1703001234,
+                "c": chunk_id,
+                "p": i,
+                "co": int("#FF5733".lstrip("#"), 16),
+                "u": "user_123",
+                "t": 1703001234,
             }
         )
 
@@ -439,22 +442,26 @@ def test_end_to_end_canvas_pixel_update(dynamodb_mock):
     message_body = json.loads(sqs_message["Body"])
     pixel_data = json.loads(message_body["Message"])
 
-    chunk_id = f"0#{pixel_data['x']//100}#{pixel_data['y']//100}"
-    pixel_id = f"{chunk_id}#{pixel_data['x']}#{pixel_data['y']}"
+    cx = pixel_data['x'] // 100
+    cy = pixel_data['y'] // 100
+    chunk_id = f"{cx}#{cy}"
+    lx = pixel_data['x'] % 100
+    ly = pixel_data['y'] % 100
+    position = ly * 100 + lx
     
     canvas_table.put_item(
         Item={
-            "ChunkId": chunk_id,
-            "PixelId": pixel_id,
-            "color": pixel_data["color"],
-            "userId": pixel_data["userId"],
-            "timestamp": 1703001234,
+            "c": chunk_id,
+            "p": position,
+            "co": int(pixel_data["color"].lstrip("#"), 16),
+            "u": pixel_data["userId"],
+            "t": 1703001234,
         }
     )
 
     # Step 4: Verify pixel was written
-    response = canvas_table.get_item(Key={"ChunkId": chunk_id, "PixelId": pixel_id})
-    assert response["Item"]["color"] == "#FFFFFF"
+    response = canvas_table.get_item(Key={"c": chunk_id, "p": position})
+    assert response["Item"]["co"] == int("#FFFFFF".lstrip("#"), 16)
 
     # Step 5: Store a connected client
     connections_table.put_item(
