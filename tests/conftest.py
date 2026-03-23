@@ -15,6 +15,8 @@ os.environ["CANVAS_TABLE_NAME"] = "test-canvas-pixels"
 os.environ["RATE_LIMIT_TABLE_NAME"] = "test-rate-limits"
 os.environ["CONNECTIONS_TABLE_NAME"] = "test-websocket-connections"
 os.environ["AWS_XRAY_CONTEXT_MISSING"] = "LOG_ERROR"
+os.environ["SNS_TOPIC_ARN"] = "arn:aws:sns:us-east-1:123456789012:test-pixel-events-topic"
+os.environ["PIXEL_WORKER_QUEUE_URL"] = "https://sqs.us-east-1.amazonaws.com/123456789012/test-pixel-worker-queue"
 
 # START MOTO GLOBALLY so module-level boto3.client() calls map to Moto,
 # which fixes cold-start initialization testing issues.

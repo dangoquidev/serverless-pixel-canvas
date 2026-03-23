@@ -50,9 +50,9 @@ def test_pixel_worker_processes_valid_message(dynamodb_mock):
     assert items[0]["color"] == "#FF0000"
     assert items[0]["author_id"] == "test_user_123"
 
-def test_pixel_worker_enforces_rate_limit(dynamodb_mock):
+def test_pixel_worker_enforces_rate_limit(dynamodb_mock, caplog):
     """Test that submitting more than 20 requests per minute rejects the pixels."""
-    sns_message = {"payload": {"user_id": "spammer", "x": 10, "y": 10, "color": "#000"}}
+    sns_message = {"payload": {"user_id": "spammer", "x": 10, "y": 10, "color": "#000000"}}
     sqs_event = {
         "Records": [{"body": json.dumps({"Message": json.dumps(sns_message)})}]
     }
