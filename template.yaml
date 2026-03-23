@@ -83,25 +83,35 @@ Resources:
       BucketName: !Sub "${AWS::StackName}-snapshots-${AWS::AccountId}"
 
   # ==========================================
+  # SHARED LAYERS
+  # ==========================================
+  CanvasUtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: canvas-shared-utils
+      Description: Shared binary encoding/decoding utilities
+      ContentUri: layers/canvas_utils/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Retain
+  # ==========================================
   # 2. DATABASES (DynamoDB)
   # ==========================================
-  CanvasPixelsTable:
+  CanvasPixelsTableV2:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: canvas-pixels
+      TableName: canvas-pixels-v2
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: ChunkId
-          AttributeType: S
-        - AttributeName: PixelId
-          AttributeType: S
+        - AttributeName: c
+          AttributeType: S   # 'c' is the Chunk Partition (String, e.g., "5#5")
+        - AttributeName: p
+          AttributeType: N   # 'p' is the Local Position (Number, e.g., 5050)
       KeySchema:
-        - AttributeName: ChunkId
+        - AttributeName: c
           KeyType: HASH
-        - AttributeName: PixelId
+        - AttributeName: p
           KeyType: RANGE
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES # Mandatory for the Broadcast Worker
 
   WebSocketConnectionsTable:
     Type: AWS::DynamoDB::Table
@@ -111,9 +121,18 @@ Resources:
       AttributeDefinitions:
         - AttributeName: ConnectionId
           AttributeType: S
+        - AttributeName: LiveStatus
+          AttributeType: S
       KeySchema:
         - AttributeName: ConnectionId
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: LiveStatusIndex
+          KeySchema:
+            - AttributeName: LiveStatus
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
 
   RateLimitsTable:
     Type: AWS::DynamoDB::Table
@@ -142,6 +161,7 @@ Resources:
     Properties:
       TopicName: pixel-events-topic
 
+  # Dead Letter Queue
   PixelWorkerDLQ:
     Type: AWS::SQS::Queue
 
@@ -172,7 +192,11 @@ Resources:
       Protocol: sqs
       TopicArn: !Ref PixelEventsTopic
       Endpoint: !GetAtt PixelWorkerQueue.Arn
+      FilterPolicy:
+        action:
+          - "draw_pixel"
 
+  # Snapshot Queue
   SnapshotWorkerQueue:
     Type: AWS::SQS::Queue
 
@@ -196,6 +220,37 @@ Resources:
       Protocol: sqs
       TopicArn: !Ref PixelEventsTopic
       Endpoint: !GetAtt SnapshotWorkerQueue.Arn
+      FilterPolicy:
+        action:
+          - "snapshot"
+
+#Broadcast Queue
+  BroadcastWorkerQueue:
+    Type: AWS::SQS::Queue
+
+  BroadcastWorkerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref BroadcastWorkerQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: "sns.amazonaws.com" }
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt BroadcastWorkerQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref PixelEventsTopic }
+
+  BroadcastWorkerSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref PixelEventsTopic
+      Endpoint: !GetAtt BroadcastWorkerQueue.Arn
+      FilterPolicy:
+        action:
+          - "draw_pixel"
 
   # ==========================================
   # 4. REST API & CUSTOM AUTHORIZER
@@ -204,10 +259,13 @@ Resources:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
+      BinaryMediaTypes:
+        - "application/octet-stream"
       Cors:
         AllowMethods: "'GET,POST,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization'"
         AllowOrigin: "'*'"
+        MaxAge: "'600'"
       Auth:
         DefaultAuthorizer: CanvasJwtAuthorizer
         AddDefaultAuthorizerToCorsPreflight: false
@@ -303,13 +361,16 @@ Resources:
     Properties:
       CodeUri: serverless/pixel_worker/
       Handler: app.lambda_handler
+      MemorySize: 512
+      Layers:
+        - !Ref CanvasUtilsLayer
       Environment:
         Variables:
-          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTableV2
           RATE_LIMIT_TABLE_NAME: !Ref RateLimitsTable
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref CanvasPixelsTable
+            TableName: !Ref CanvasPixelsTableV2
         - DynamoDBCrudPolicy:
             TableName: !Ref RateLimitsTable
       Events:
@@ -317,7 +378,7 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt PixelWorkerQueue.Arn
-            BatchSize: 10
+            BatchSize: 100
             MaximumBatchingWindowInSeconds: 1
 
   DlqProcessorFunction:
@@ -344,6 +405,9 @@ Resources:
     Properties:
       CodeUri: serverless/broadcast_worker/
       Handler: app.lambda_handler
+      MemorySize: 512
+      Layers:
+        - !Ref CanvasUtilsLayer
       Environment:
         Variables:
           CONNECTIONS_TABLE_NAME: !Ref WebSocketConnectionsTable
@@ -356,12 +420,12 @@ Resources:
               Action: [ "execute-api:ManageConnections" ]
               Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PixelWebSocketApi}/production/*"
       Events:
-        StreamEvent:
-          Type: DynamoDB
+        SQSEvent:
+          Type: SQS
           Properties:
-            Stream: !GetAtt CanvasPixelsTable.StreamArn
-            StartingPosition: LATEST
-            BatchSize: 100
+            Queue: !GetAtt BroadcastWorkerQueue.Arn
+            BatchSize: 30
+            MaximumBatchingWindowInSeconds: 3
 
   WebSocketManagerFunction:
     Type: AWS::Serverless::Function
@@ -380,12 +444,14 @@ Resources:
     Properties:
       CodeUri: serverless/canvas_reader/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref CanvasUtilsLayer
       Environment:
         Variables:
-          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTableV2
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref CanvasPixelsTable
+            TableName: !Ref CanvasPixelsTableV2
       Events:
         GetCanvasApi:
           Type: Api
@@ -451,15 +517,17 @@ Resources:
     Properties:
       CodeUri: serverless/snapshot_worker/
       Handler: app.lambda_handler
+      Layers:
+        - !Ref CanvasUtilsLayer
       Timeout: 30
       MemorySize: 512
       Environment:
         Variables:
-          CANVAS_TABLE_NAME: !Ref CanvasPixelsTable
+          CANVAS_TABLE_NAME: !Ref CanvasPixelsTableV2
           SNAPSHOT_BUCKET: !Ref SnapshotsBucket
       Policies:
         - DynamoDBReadPolicy:
-            TableName: !Ref CanvasPixelsTable
+            TableName: !Ref CanvasPixelsTableV2
         - S3WritePolicy:
             BucketName: !Ref SnapshotsBucket
       Events:

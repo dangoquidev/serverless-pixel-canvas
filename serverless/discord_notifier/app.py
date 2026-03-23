@@ -15,10 +15,11 @@ s3 = boto3.client("s3")
 
 DISCORD_SECRET_NAME = os.environ.get("DISCORD_SECRET_NAME", "DiscordSecrets")
 DISCORD_API_BASE = "https://discord.com/api/v10"
-EXPIRATION_TIME = 1 * 24 * 60 * 60 # 1 days
+EXPIRATION_TIME = 1 * 24 * 60 * 60  # 1 days
 
 
 # --- Helper Functions ---
+
 
 def get_discord_secrets() -> dict:
     """Fetches Discord secrets from Secrets Manager (cached by Powertools)."""
@@ -73,20 +74,15 @@ def process_s3_record(record: dict, secrets: dict, correlation_id: str) -> bool:
         raise ValueError("AppId required in DiscordSecrets")
 
     image_url = s3.generate_presigned_url(
-        ClientMethod='get_object',
-        Params={
-            'Bucket': bucket_name,
-            'Key': object_key
-        },
-        ExpiresIn=EXPIRATION_TIME
+        ClientMethod="get_object",
+        Params={"Bucket": bucket_name, "Key": object_key},
+        ExpiresIn=EXPIRATION_TIME,
     )
 
     content = f"Here is the current canvas snapshot! {image_url}"
 
     patch_deferred_message(
-        application_id=application_id,
-        interaction_token=discord_token,
-        content=content
+        application_id=application_id, interaction_token=discord_token, content=content
     )
 
     logger.info("Successfully notified Discord", extra={"object_key": object_key})
@@ -94,6 +90,7 @@ def process_s3_record(record: dict, secrets: dict, correlation_id: str) -> bool:
 
 
 # --- Main Handler ---
+
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context(clear_state=True)
@@ -125,7 +122,9 @@ def lambda_handler(event: dict, context: LambdaContext) -> dict:
             )
             raise
         except Exception as e:
-            logger.exception("Failed to process S3 record", extra={"object_key": object_key})
+            logger.exception(
+                "Failed to process S3 record", extra={"object_key": object_key}
+            )
             raise
 
     return {

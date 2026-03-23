@@ -14,6 +14,7 @@ SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
 
 # --- Helper Functions ---
 
+
 def create_response(status_code: int, body: dict) -> dict:
     """Standardized response helper with CORS."""
     return {
@@ -26,6 +27,7 @@ def create_response(status_code: int, body: dict) -> dict:
         },
         "body": json.dumps(body),
     }
+
 
 def validate_pixel(body: dict) -> tuple[bool, str]:
     """Strict validation of pixel data types and values."""
@@ -46,7 +48,9 @@ def validate_pixel(body: dict) -> tuple[bool, str]:
     except Exception:
         return False, "Invalid payload format"
 
+
 # --- Main Handler ---
+
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_REST)
@@ -68,7 +72,9 @@ def lambda_handler(event: dict, context: LambdaContext):
         is_valid, error_msg = validate_pixel(body)
 
         if not is_valid:
-            logger.warning("Validation failed", extra={"error": error_msg, "payload": body})
+            logger.warning(
+                "Validation failed", extra={"error": error_msg, "payload": body}
+            )
             return create_response(400, {"error": error_msg})
 
         # 3. Enrich Payload (Never trust the client-provided user_id)
@@ -88,16 +94,15 @@ def lambda_handler(event: dict, context: LambdaContext):
             Message=json.dumps(pixel_event),
             MessageAttributes={
                 "action": {"DataType": "String", "StringValue": "draw_pixel"}
-            }
+            },
         )
 
         logger.info("Pixel event published", user_id=user_id, x=body["x"], y=body["y"])
 
         # 5. Return 202 Accepted (Standard for async processing)
-        return create_response(202, {
-            "message": "Accepted",
-            "request_id": context.aws_request_id
-        })
+        return create_response(
+            202, {"message": "Accepted", "request_id": context.aws_request_id}
+        )
 
     except json.JSONDecodeError:
         return create_response(400, {"error": "Invalid JSON"})

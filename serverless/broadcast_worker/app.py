@@ -1,58 +1,87 @@
-import json
+import base64
 import os
+import json
 import boto3
+from boto3.dynamodb.conditions import Key
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from botocore.exceptions import ClientError
-from boto3.dynamodb.types import TypeDeserializer
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
+from canvas_utils import pixel_to_binary
 
 logger = Logger()
 tracer = Tracer()
 
-# 2. Initialization (Cold Start Optimization)
+# --- Cold Start: SDK Initialization ---
 dynamodb = boto3.resource("dynamodb")
 CONNECTIONS_TABLE_NAME = os.environ.get("CONNECTIONS_TABLE_NAME")
 WSS_API_ENDPOINT = os.environ.get("WSS_API_ENDPOINT")
 
 connections_table = dynamodb.Table(CONNECTIONS_TABLE_NAME)
 apigw_client = boto3.client("apigatewaymanagementapi", endpoint_url=WSS_API_ENDPOINT)
-deserializer = TypeDeserializer()
 
 # --- Helper Functions ---
 
 
-def deserialize_dynamodb_item(item: dict) -> dict:
-    """Converts DynamoDB stream format to standard Python dicts."""
-    return {k: deserializer.deserialize(v) for k, v in item.items()}
+def _parse_sqs_record(record: dict) -> dict:
+    """Unwraps the SQS → SNS envelope and returns the inner pixel payload."""
+    try:
+        sqs_body = json.loads(record.get("body", "{}"))
+        sns_message = json.loads(sqs_body.get("Message", "{}"))
+        return sns_message.get("payload", {})
+    except Exception:
+        return {}
 
 
-def extract_pixels_from_event(event: dict) -> list[dict]:
-    """Extracts and formats new/modified pixels from the DynamoDB Stream event."""
-    pixels = []
+def extract_pixels_to_binary(event: dict) -> bytearray:
+    """Extracts payloads from SQS records and compiles them into a binary batch."""
+    binary_payload = bytearray()
+
     for record in event.get("Records", []):
-        if record.get("eventName") in ("INSERT", "MODIFY"):
-            dynamodb_image = record.get("dynamodb", {}).get("NewImage")
-            if dynamodb_image:
-                pixels.append(
-                    {
-                        "type": "pixel_update",
-                        "data": deserialize_dynamodb_item(dynamodb_image),
-                    }
-                )
-    return pixels
+        payload = _parse_sqs_record(record)
+
+        # Validate payload has the required fields
+        if (
+            not payload
+            or "x" not in payload
+            or "y" not in payload
+            or "color" not in payload
+        ):
+            logger.warning(
+                "Invalid or missing payload in record", extra={"record": record}
+            )
+            continue
+
+        try:
+            pixel_bytes = pixel_to_binary(
+                x=int(payload["x"]), y=int(payload["y"]), color=payload["color"]
+            )
+            binary_payload.extend(pixel_bytes)
+        except Exception as e:
+            logger.warning(
+                "Failed to encode pixel to binary",
+                extra={"payload": payload, "error": str(e)},
+            )
+
+    return binary_payload
 
 
+@tracer.capture_method
 def fetch_active_connections() -> list[str]:
-    """Scans DynamoDB for all active WebSocket connection IDs, handling pagination."""
+    """Queries DynamoDB GSI for all active WebSocket connection IDs."""
     connection_ids = []
-    response = connections_table.scan(ProjectionExpression="ConnectionId")
 
-    # Extract just the string IDs to make downstream processing cleaner
+    response = connections_table.query(
+        IndexName="LiveStatusIndex",
+        KeyConditionExpression=Key("LiveStatus").eq("ACTIVE"),
+        ProjectionExpression="ConnectionId",
+    )
     connection_ids.extend([item["ConnectionId"] for item in response.get("Items", [])])
 
     while "LastEvaluatedKey" in response:
-        response = connections_table.scan(
+        response = connections_table.query(
+            IndexName="LiveStatusIndex",
+            KeyConditionExpression=Key("LiveStatus").eq("ACTIVE"),
             ProjectionExpression="ConnectionId",
             ExclusiveStartKey=response["LastEvaluatedKey"],
         )
@@ -63,26 +92,24 @@ def fetch_active_connections() -> list[str]:
     return connection_ids
 
 
-def broadcast_to_client(connection_id: str, payload: bytes) -> str | None:
-    """Sends data to a single WS client. Returns the connection_id if stale (410 Gone)."""
+def broadcast_to_client(connection_id: str, payload: bytearray) -> str | None:
+    """Sends binary data to a single WS client. Returns connection_id if stale."""
     try:
-        apigw_client.post_to_connection(ConnectionId=connection_id, Data=payload)
+        b64_payload = base64.b64encode(payload).decode("utf-8")
+
+        apigw_client.post_to_connection(ConnectionId=connection_id, Data=b64_payload)
         return None
     except ClientError as e:
         if e.response["Error"]["Code"] == "GoneException":
             return connection_id
-        logger.error(
-            json.dumps(
-                {"error": f"Failed to send to {connection_id}", "details": str(e)}
-            )
-        )
+        logger.error(f"Failed to send to {connection_id}: {str(e)}")
         return None
 
 
-def broadcast_to_all(connection_ids: list[str], payload: bytes) -> list[str]:
-    """Broadcasts to all clients concurrently. Returns a list of stale connection IDs."""
+@tracer.capture_method
+def broadcast_to_all(connection_ids: list[str], payload: bytearray) -> list[str]:
+    """Broadcasts to all clients concurrently."""
     stale_connections = []
-    # Use ThreadPoolExecutor for concurrent network I/O
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = [
             executor.submit(broadcast_to_client, conn_id, payload)
@@ -92,10 +119,10 @@ def broadcast_to_all(connection_ids: list[str], payload: bytes) -> list[str]:
             stale_id = future.result()
             if stale_id:
                 stale_connections.append(stale_id)
-
     return stale_connections
 
 
+@tracer.capture_method
 def cleanup_stale_connections(stale_connection_ids: list[str]):
     """Removes disconnected clients from DynamoDB."""
     if not stale_connection_ids:
@@ -110,55 +137,44 @@ def cleanup_stale_connections(stale_connection_ids: list[str]):
 
 
 @tracer.capture_lambda_handler
-@logger.inject_lambda_context
+@logger.inject_lambda_context(clear_state=True)
 def lambda_handler(event: dict, context: LambdaContext):
-    """Main orchestrator for the real-time WebSocket broadcast."""
-    correlation_id = context.aws_request_id
+    """Main orchestrator for the real-time binary WebSocket broadcast."""
+    logger.append_keys(
+        correlation_id=context.aws_request_id, function="broadcast_worker"
+    )
 
-    # 1. Parse Event
-    pixels_to_broadcast = extract_pixels_from_event(event)
-    if not pixels_to_broadcast:
+    binary_payload = extract_pixels_to_binary(event)
+
+    if not binary_payload:
+        logger.info("No valid pixel updates found in batch.")
         return {"statusCode": 200, "body": "No updates."}
 
-    message_payload = json.dumps(pixels_to_broadcast).encode("utf-8")
-
     try:
-        # 2. Fetch Connections
         connections = fetch_active_connections()
         if not connections:
+            logger.info("No active WebSocket connections to broadcast to.")
             return {"statusCode": 200, "body": "No active connections."}
 
-        # 3. Broadcast
-        stale_connections = broadcast_to_all(connections, message_payload)
+        stale_connections = broadcast_to_all(connections, binary_payload)
 
-        # 4. Cleanup
         cleanup_stale_connections(stale_connections)
 
-        # 5. Log Success
+        pixels_sent = len(binary_payload) // 7
         logger.info(
-            json.dumps(
-                {
-                    "function": "broadcast_worker",
-                    "message": "Broadcast complete",
-                    "correlation_id": correlation_id,
-                    "pixels_sent": len(pixels_to_broadcast),
-                    "active_clients": len(connections) - len(stale_connections),
-                    "stale_cleaned": len(stale_connections),
-                }
-            )
+            "Broadcast complete",
+            extra={
+                "pixels_sent": pixels_sent,
+                "bytes_sent": len(binary_payload),
+                "active_clients": len(connections) - len(stale_connections),
+                "stale_cleaned": len(stale_connections),
+            },
         )
 
         return {"statusCode": 200, "body": "Broadcast complete."}
 
     except Exception as e:
-        logger.error(
-            json.dumps(
-                {
-                    "function": "broadcast_worker",
-                    "message": "Critical error during broadcast workflow",
-                    "error": str(e),
-                    "correlation_id": correlation_id,
-                }
-            )
+        logger.exception(
+            "Critical error during broadcast workflow", extra={"error": str(e)}
         )
-        return {"statusCode": 500, "body": "Internal server error"}
+        raise
