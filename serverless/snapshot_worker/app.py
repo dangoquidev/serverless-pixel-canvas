@@ -52,14 +52,25 @@ def generate_image(pixels: list, file_path: str) -> None:
 
     for pixel in pixels:
         try:
-            _, x_str, y_str = pixel["PixelId"].split("#")
-            x, y = int(x_str), int(y_str)
+            # Decode minified DynamoDB schema
+            cx_str, cy_str = pixel["c"].split("#")
+            cx, cy = int(cx_str), int(cy_str)
+            p = int(pixel["p"])
+            
+            # Reconstruct global coordinates
+            lx = p % 100  # CHUNK_SIZE
+            ly = p // 100
+            x = (cx * 100) + lx
+            y = (cy * 100) + ly
 
             if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT:
-                color = pixel.get("color", "#000000")
-                pixels_data[x, y] = hex_to_rgb(color)
+                color_int = int(pixel.get("co", 0))
+                r = (color_int >> 16) & 255
+                g = (color_int >> 8) & 255
+                b = color_int & 255
+                pixels_data[x, y] = (r, g, b)
         except Exception as e:
-            logger.warning(f"Failed to process pixel {pixel.get('PixelId')}: {str(e)}")
+            logger.warning(f"Failed to process pixel {pixel.get('c')}: {str(e)}")
             continue
 
     img.save(file_path)

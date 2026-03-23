@@ -52,14 +52,18 @@ def test_pixel_worker_processes_valid_message(dynamodb_mock):
     assert items[0]["co"] == Decimal("16711680")  # #FF0000 as integer
     assert items[0]["u"] == "test_user_123"  # Minified user_id key
 
-def test_pixel_worker_enforces_rate_limit(dynamodb_mock, caplog):
-    """Test that submitting more than 20 requests per minute rejects the pixels."""
-    sns_message = {"payload": {"user_id": "spammer", "x": 10, "y": 10, "color": "#000000"}}
+def test_pixel_worker_accepts_all_pixels_no_rate_limiting(dynamodb_mock, caplog):
+    """Test that pixel_worker accepts all pixels since rate limiting is done in web_proxy.
+    
+    Rate limiting has been consolidated to web_proxy (token bucket algorithm).
+    pixel_worker receives only pre-validated, rate-limited pixels.
+    """
+    sns_message = {"payload": {"user_id": "user123", "x": 10, "y": 10, "color": "#000000"}}
     sqs_event = {
         "Records": [{"body": json.dumps({"Message": json.dumps(sns_message)})}]
     }
     
-    # We loop 25 times. The first 20 should succeed, the last 5 should hit the rate limit constraint
+    # Submit multiple pixels - all should be accepted since rate limiting is upstream
     for _ in range(25):
         lambda_handler(sqs_event, MockLambdaContext())
         
@@ -67,12 +71,7 @@ def test_pixel_worker_enforces_rate_limit(dynamodb_mock, caplog):
     
     db_response = table.scan()
     
-    # Even though we sent 25 messages, exactly 20 should be saved due to 
-    # the DynamoDB `attribute_not_exists(draw_count) OR draw_count < :limit` rule
-    # Note: Because the mock runs fast, they will overwrite the same PIXEL#10#10 
-    # but the rate limit table will have count = 20.
-    rate_table = dynamodb_mock.Table(os.environ["RATE_LIMIT_TABLE_NAME"])
-    rate_items = rate_table.scan()["Items"]
-    
-    assert len(rate_items) == 1
-    assert rate_items[0]["draw_count"] == 20
+    # All pixels should be written (they overwrite the same position, but that's expected)
+    # Rate limiting is no longer done at this level
+    assert len(db_response["Items"]) > 0
+    assert db_response["Items"][0]["u"] == "user123"

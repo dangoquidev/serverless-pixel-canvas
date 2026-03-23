@@ -435,7 +435,6 @@ Resources:
     Properties:
       CodeUri: serverless/broadcast_worker/
       Handler: app.lambda_handler
-<<<<<<< HEAD
       Timeout: 30  # Longer timeout for large broadcasts
       MemorySize: 512  # More memory for handling large broadcasts
       Environment:
@@ -619,21 +618,21 @@ Resources:
         Variables:
           DISCORD_SECRET_NAME: "DiscordSecrets"
           DISCORD_NOTIFIER_DLQ_URL: !Ref DiscordNotifierDLQ
+          SNAPSHOT_BUCKET: !Ref SnapshotsBucket
       Policies:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
         - Statement:
             - Effect: Allow
               Action: "s3:GetObject"
-              Resource: !Sub "arn:aws:s3:::${AWS::StackName}-snapshots-${AWS::AccountId}/*"
+              Resource: !Sub "arn:aws:s3:::${SnapshotsBucket}/*"
         - SQSSendMessagePolicy:
             QueueName: !GetAtt DiscordNotifierDLQ.QueueName
       Events:
-        SnapshotCreatedEvent:
-          Type: S3
+        SnapshotCompleteEvent:
+          Type: SNS
           Properties:
-            Bucket: !Ref SnapshotsBucket
-            Events: s3:ObjectCreated:*
+            Topic: !Ref SnapshotCompleteTopic
 
   # ==========================================
   # 7. OBSERVABILITY (Alarms & Topics)

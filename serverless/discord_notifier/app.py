@@ -18,6 +18,7 @@ DISCORD_SECRET_NAME = os.environ.get("DISCORD_SECRET_NAME", "DiscordSecrets")
 DISCORD_API_BASE = "https://discord.com/api/v10"
 EXPIRATION_TIME = 1 * 24 * 60 * 60  # 1 day
 DISCORD_NOTIFIER_DLQ_URL = os.environ.get("DISCORD_NOTIFIER_DLQ_URL")
+SNAPSHOT_BUCKET = os.environ.get("SNAPSHOT_BUCKET", "")
 
 # Circuit breaker: retry configuration
 MAX_RETRIES = 3
@@ -32,10 +33,27 @@ def get_discord_secrets() -> dict:
     return parameters.get_secret(DISCORD_SECRET_NAME, transform="json")
 
 
-def get_discord_token_from_metadata(bucket_name: str, object_key: str) -> str | None:
-    """Retrieves the Discord interaction token from S3 object metadata."""
-    response = s3.head_object(Bucket=bucket_name, Key=object_key)
-    return response.get("Metadata", {}).get("discord_token")
+def extract_snapshot_data_from_sns(message: dict) -> tuple[str, str, str] | tuple[None, None, None]:
+    """Extracts snapshot data from SNS message published by snapshot_worker.
+    
+    Returns: (object_key, discord_token, bucket_name) or (None, None, None) on error
+    """
+    try:
+        object_key = message.get("object_key")
+        discord_token = message.get("discord_token")
+        bucket_name = SNAPSHOT_BUCKET
+        
+        if not object_key or not discord_token or not bucket_name:
+            logger.warning(
+                "Missing required fields in SNS message",
+                extra={"message": message}
+            )
+            return None, None, None
+        
+        return object_key, discord_token, bucket_name
+    except Exception as e:
+        logger.warning(f"Failed to extract snapshot data from SNS: {str(e)}")
+        return None, None, None
 
 
 def patch_deferred_message(
@@ -152,22 +170,19 @@ def send_to_dlq(record: dict, error: str, correlation_id: str):
                 "correlation_id": correlation_id,
             })
         )
-    """
-    Processes a single S3 ObjectCreated record. Returns True if successful.
-    """
-    bucket_name = record["s3"]["bucket"]["name"]
-    object_key = record["s3"]["object"]["key"]
 
-    discord_token = get_discord_token_from_metadata(bucket_name, object_key)
-    if not discord_token:
-        logger.warning(
-            "No discord_token in S3 metadata, skipping",
-            extra={"object_key": object_key},
-        )
+
+def process_sns_snapshot(message: dict, secrets: dict, correlation_id: str) -> bool:
+    """Processes a snapshot completion event from SNS.
+    
+    snapshot_worker publishes snapshot completion events directly with the 
+    discord_token already included, avoiding extra S3 head_object calls.
+    """
+    object_key, discord_token, bucket_name = extract_snapshot_data_from_sns(message)
+    if not object_key or not discord_token:
         return False
 
     application_id = secrets.get("AppId", "")
-
     if not application_id:
         logger.error("AppId missing from DiscordSecrets")
         raise ValueError("AppId required in DiscordSecrets")
@@ -198,22 +213,26 @@ def send_to_dlq(record: dict, error: str, correlation_id: str):
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context(clear_state=True)
 def lambda_handler(event: dict, context: LambdaContext) -> dict:
-    """Notifies Discord after a snapshot is uploaded to S3."""
+    """Notifies Discord after a snapshot is completed (via SNS from snapshot_worker)."""
     correlation_id = context.aws_request_id
     logger.append_keys(correlation_id=correlation_id, function="discord_notifier")
 
     records = event.get("Records", [])
     if not records:
-        logger.info("No S3 records to process")
+        logger.info("No SNS records to process")
         return {"statusCode": 200, "body": "No records to process"}
 
     secrets = get_discord_secrets()
     processed_count = 0
 
     for record in records:
-        object_key = record.get("s3", {}).get("object", {}).get("key", "unknown")
+        # Extract SNS message
+        sns_message = record.get("Sns", {})
+        message = json.loads(sns_message.get("Message", "{}"))
+        object_key = message.get("object_key", "unknown")
+        
         try:
-            if process_s3_record(record, secrets, correlation_id):
+            if process_sns_snapshot(message, secrets, correlation_id):
                 processed_count += 1
         except requests.HTTPError as e:
             logger.error(
@@ -240,7 +259,7 @@ def lambda_handler(event: dict, context: LambdaContext) -> dict:
         except Exception as e:
             logger.exception(
                 json.dumps({
-                    "message": "Failed to process S3 record",
+                    "message": "Failed to process snapshot event",
                     "object_key": object_key,
                     "error": str(e),
                     "correlation_id": correlation_id,

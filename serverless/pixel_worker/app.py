@@ -47,31 +47,8 @@ def _is_valid_payload(payload: dict) -> bool:
     return True
 
 
-@tracer.capture_method
-def check_rate_limit(user_id: str) -> bool:
-    """Uses a DynamoDB atomic counter to enforce a per-user, per-minute rate limit."""
-    current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
-
-    try:
-        rate_limit_table.update_item(
-            Key={
-                "UserId": f"RATELIMIT#{user_id}",
-                "TimeWindow": f"WINDOW#{current_minute}",
-            },
-            UpdateExpression="ADD draw_count :inc SET ExpirationTime = :ttl",
-            ExpressionAttributeValues={
-                ":inc": 1,
-                ":ttl": int(time.time()) + 120,
-                ":limit": MAX_PIXELS_PER_MINUTE,
-            },
-            ConditionExpression="attribute_not_exists(draw_count) OR draw_count < :limit",
-            ReturnValues="UPDATED_NEW",
-        )
-        return True
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
-        raise
+# NOTE: Rate limiting moved to web_proxy (token bucket algorithm)
+# pixel_worker receives pre-validated pixels, no need to duplicate rate limiting here
 
 
 def save_pixel(x: int, y: int, color: str, user_id: str) -> None:
@@ -97,12 +74,8 @@ def _process_record(record: dict, correlation_id: str) -> bool:
     y = int(payload["y"])
     color = payload["color"]
 
-    if not check_rate_limit(user_id):
-        logger.warning(
-            "Rate limit exceeded",
-            extra={"user_id": user_id, "correlation_id": correlation_id},
-        )
-        return False
+    # Rate limiting is handled by web_proxy (token bucket) before SNS publish
+    # pixel_worker receives pre-validated, rate-limited pixels only
 
     save_pixel(x, y, color, user_id)
 
