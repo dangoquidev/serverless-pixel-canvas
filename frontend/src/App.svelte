@@ -2,6 +2,7 @@
   import "./app.css";
   import { onMount } from "svelte";
   import { isConnected, wsError } from "./stores/wsStore.js";
+  import { isOffline, queueSize } from "./stores/offlineStore.js";
 
   import AccountButton from "./components/AccountButton.svelte";
   import AuthModal from "./components/AuthModal.svelte";
@@ -46,6 +47,16 @@
       <span class="blink">●</span> OFFLINE - RECONNECTING
     </div>
   {/if}
+
+  {#if $queueSize > 0}
+    <div class="queue-indicator" role="status" aria-live="polite">
+      <strong>OFFLINE QUEUE:</strong>
+      {$queueSize} pixel{$queueSize > 1 ? "s" : ""} pending
+      {#if $isOffline}
+        <span class="blink"> · waiting for connection</span>
+      {/if}
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -83,6 +94,19 @@
   }
   .error {
     color: #ff0044;
+  }
+
+  .queue-indicator {
+    position: fixed;
+    top: 72px;
+    right: 20px;
+    padding: 10px 14px;
+    border: 2px solid #00e5ff;
+    background: rgba(0, 0, 0, 0.9);
+    color: #00e5ff;
+    z-index: 2000;
+    font-size: 0.75rem;
+    text-transform: uppercase;
   }
 
   /* Loading Overlay */

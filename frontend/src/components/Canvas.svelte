@@ -4,6 +4,8 @@
     selectedColor,
     loadedChunks,
     pixelsRemaining,
+    consumePixel,
+    refundPixel,
   } from "../stores/canvasStore.js";
   import { fetchChunk, drawPixel } from "../utils/api.js";
   import { connectWebSocket, disconnectWebSocket } from "../stores/wsStore.js";
@@ -149,16 +151,17 @@
 
     const previousPixel = engine.getPixel(x, y);
 
+    if (!consumePixel()) return;
+
     engine.updatePixel(x, y, r, g, b, 100);
     engine.render();
-    pixelsRemaining.update((n) => n - 1);
 
     try {
       await drawPixel(x, y, color);
     } catch (err) {
       console.error("Failed to draw pixel:", err);
 
-      pixelsRemaining.update((n) => n + 1);
+      refundPixel();
 
       if (previousPixel) {
         engine.updatePixel(
