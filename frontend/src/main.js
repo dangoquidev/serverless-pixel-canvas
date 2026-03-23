@@ -2,6 +2,7 @@ import { mount } from 'svelte'
 import './app.css'
 import App from './App.svelte'
 import { initializeOfflineDB } from './stores/offlineStore.js'
+import { syncQueuedPixels } from './utils/api.js'
 
 const app = mount(App, {
   target: document.getElementById('app'),
@@ -19,6 +20,12 @@ if ('serviceWorker' in navigator) {
 // Initialize offline database
 initializeOfflineDB().then(() => {
   console.log('Offline database initialized');
+
+  if (navigator.onLine) {
+    syncQueuedPixels().catch((error) => {
+      console.warn('Initial offline queue sync failed:', error);
+    });
+  }
 });
 
 export default app
