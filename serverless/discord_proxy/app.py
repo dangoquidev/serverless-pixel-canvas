@@ -1,6 +1,7 @@
 import os
 import json
 import boto3
+import re
 from enum import IntEnum
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
@@ -13,6 +14,7 @@ tracer = Tracer()
 
 sns_client = boto3.client("sns")
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
+APP_SECRET_NAME = os.environ.get("APP_SECRET_NAME", "AppSecrets")
 
 # --- Constants & Enums (No more magic numbers!) ---
 
@@ -25,6 +27,10 @@ class ResponseType(IntEnum):
     PONG = 1
     CHANNEL_MESSAGE_WITH_SOURCE = 4
     DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5
+
+
+CANVAS_SIZE = 1000
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 # --- Authentication & Signatures ---
@@ -40,6 +46,24 @@ def get_verify_key() -> VerifyKey | None:
     except Exception:
         logger.exception("Failed to load or parse DISCORD PublicKey")
         return None
+
+
+def get_admin_discord_ids() -> set[str]:
+    """Fetches Discord admin IDs from AppSecrets.DiscordAdminIds."""
+    try:
+        app_secrets = parameters.get_secret(APP_SECRET_NAME, transform="json")
+        raw_ids = app_secrets.get("DiscordAdminIds", [])
+
+        if isinstance(raw_ids, str):
+            return {admin_id.strip() for admin_id in raw_ids.split(",") if admin_id.strip()}
+
+        if isinstance(raw_ids, list):
+            return {str(admin_id).strip() for admin_id in raw_ids if str(admin_id).strip()}
+
+        return set()
+    except Exception:
+        logger.exception("Failed to load DiscordAdminIds from AppSecrets")
+        return set()
 
 def verify_signature(event: dict, verify_key: VerifyKey | None) -> bool:
     """Verifies the request signature from Discord using ED25519."""
@@ -62,6 +86,38 @@ def verify_signature(event: dict, verify_key: VerifyKey | None) -> bool:
         return False
 
 
+def get_discord_user_id(body: dict) -> str | None:
+    member = body.get("member", {}) or {}
+    member_user = member.get("user", {}) or {}
+    user = body.get("user", {}) or {}
+    user_id = member_user.get("id") or user.get("id")
+    return str(user_id) if user_id else None
+
+
+def extract_command_options(data: dict) -> dict:
+    options = data.get("options", []) or []
+    return {option.get("name"): option.get("value") for option in options if option.get("name")}
+
+
+def publish_event(action: str, payload: dict) -> None:
+    event_payload = {
+        "source": "discord",
+        "action": action,
+        "payload": payload,
+    }
+
+    sns_client.publish(
+        TopicArn=SNS_TOPIC_ARN,
+        Message=json.dumps(event_payload),
+        MessageAttributes={
+            "action": {
+                "DataType": "String",
+                "StringValue": action,
+            }
+        },
+    )
+
+
 # --- Command Handlers (The "Future Proof" section) ---
 
 def handle_async_command(command_name: str, body: dict, data: dict) -> dict:
@@ -73,7 +129,16 @@ def handle_async_command(command_name: str, body: dict, data: dict) -> dict:
         "payload": data,
     }
 
-    sns_client.publish(TopicArn=SNS_TOPIC_ARN, Message=json.dumps(event_payload))
+    sns_client.publish(
+        TopicArn=SNS_TOPIC_ARN,
+        Message=json.dumps(event_payload),
+        MessageAttributes={
+            "action": {
+                "DataType": "String",
+                "StringValue": command_name,
+            }
+        },
+    )
 
     return {"type": ResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE}
 
@@ -86,10 +151,94 @@ def handle_ping_command(command_name: str, body: dict, data: dict) -> dict:
     }
 
 
+def handle_draw_command(command_name: str, body: dict, data: dict) -> dict:
+    """Allows drawing a single pixel from Discord with validated options."""
+    user_id = get_discord_user_id(body)
+    if not user_id:
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "Missing Discord user context.", "flags": 64},
+        }
+
+    options = extract_command_options(data)
+
+    try:
+        x = int(options.get("x"))
+        y = int(options.get("y"))
+    except (ValueError, TypeError):
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "x and y must be integers.", "flags": 64},
+        }
+
+    color = str(options.get("color", "")).strip()
+
+    if not (0 <= x < CANVAS_SIZE and 0 <= y < CANVAS_SIZE):
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "Coordinates must be between 0 and 999.", "flags": 64},
+        }
+
+    if not HEX_COLOR_RE.match(color):
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "color must match #RRGGBB.", "flags": 64},
+        }
+
+    publish_event(
+        action="draw_pixel",
+        payload={
+            "user_id": user_id,
+            "x": x,
+            "y": y,
+            "color": color,
+            "source": "discord",
+        },
+    )
+
+    return {
+        "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        "data": {"content": f"Pixel queued: ({x}, {y}) {color}", "flags": 64},
+    }
+
+
+def handle_clean_command(command_name: str, body: dict, data: dict) -> dict:
+    """Queues a full-canvas clean operation, restricted to configured Discord admins."""
+    user_id = get_discord_user_id(body)
+    if not user_id:
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "Missing Discord user context.", "flags": 64},
+        }
+
+    admin_ids = get_admin_discord_ids()
+    if user_id not in admin_ids:
+        logger.warning("Unauthorized clean attempt", discord_user_id=user_id)
+        return {
+            "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "You are not allowed to use /clean.", "flags": 64},
+        }
+
+    publish_event(
+        action="clean",
+        payload={
+            "requested_by": user_id,
+            "source": "discord",
+        },
+    )
+
+    return {
+        "type": ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        "data": {"content": "Canvas clean queued.", "flags": 64},
+    }
+
+
 # THE REGISTRY: Map command names to their handler functions
 COMMAND_ROUTER = {
     "snapshot": handle_async_command,
     "ping": handle_ping_command,
+    "draw": handle_draw_command,
+    "clean": handle_clean_command,
 }
 
 

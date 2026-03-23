@@ -9,7 +9,15 @@
 
 **Environment Variables:**
 * `SNS_TOPIC_ARN`: The ARN of the fan-out SNS topic.
-* `DISCORD_PUBLIC_KEY`: Used to verify the request signature.
+* `DISCORD_SECRET_NAME`: Secret name that contains Discord keys (including `PublicKey`).
+* `APP_SECRET_NAME`: Secret that contains `DiscordAdminIds` for `/clean` authorization.
+
+**Supported Commands:**
+* `/snapshot`: Generates a canvas snapshot asynchronously.
+* `/ping`: Health check command with immediate response.
+* `/draw x y color`: Queues one pixel draw event (`color` must be `#RRGGBB`).
+* `/clean`: Admin-only full canvas clean (Discord IDs from `AppSecrets.DiscordAdminIds`).
 
 **IAM Permissions Required:**
 * `sns:Publish` on the `pixel-events-topic`.
+* `secretsmanager:GetSecretValue` for `DiscordSecrets-*` and `AppSecrets-*`.
