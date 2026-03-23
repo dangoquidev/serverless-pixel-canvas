@@ -1,9 +1,14 @@
 import os
+import sys
 import pytest
 import boto3
 from unittest.mock import MagicMock
 from moto import mock_aws
 from aws_lambda_powertools.utilities.typing import LambdaContext
+
+# Add layers to Python path for imports (simulates AWS Lambda layer behavior)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'layers', 'canvas_utils', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'serverless'))
 
 # Set dummy environment variables BEFORE importing your Lambda apps
 os.environ["AWS_ACCESS_KEY_ID"] = "testing"

@@ -455,11 +455,10 @@ Resources:
         - SQSSendMessagePolicy:
             QueueName: !GetAtt BatchBroadcastQueue.QueueName
       Events:
-        StreamEvent:
-          Type: DynamoDB
+        SQSEvent:
+          Type: SQS
           Properties:
-            Stream: !GetAtt CanvasPixelsTable.StreamArn
-            StartingPosition: LATEST
+            Queue: !GetAtt BroadcastWorkerQueue.Arn
             BatchSize: 100
 
   BatchBroadcastWorkerFunction:
