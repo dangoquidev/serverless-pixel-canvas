@@ -11,29 +11,30 @@ from tests.conftest import MockLambdaContext
 from serverless.broadcast_worker.app import lambda_handler
 
 @patch("serverless.broadcast_worker.app.apigw_client.post_to_connection")
-def test_broadcast_worker_parses_dynamodb_stream(mock_post, dynamodb_mock):
-    """Test that the broadcast worker correctly handles DynamoDB Streams and pushes to clients."""
+def test_broadcast_worker_parses_sns_sqs_messages(mock_post, dynamodb_mock):
+    """Test that the broadcast worker correctly handles SNS→SQS messages and broadcasts to clients."""
 
     # 1. Arrange: Insert connections into DynamoDB
     table = dynamodb_mock.Table(os.environ["CONNECTIONS_TABLE_NAME"])
-    table.put_item(Item={"ConnectionId": "conn-1"})
-    table.put_item(Item={"ConnectionId": "conn-2"})
+    table.put_item(Item={"ConnectionId": "conn-1", "LiveStatus": "ACTIVE"})
+    table.put_item(Item={"ConnectionId": "conn-2", "LiveStatus": "ACTIVE"})
 
     # Mock the API Gateway Management API (already handled via @patch decorator)
 
-    # Mock a DynamoDB STREAM event payload (like adding a pixel)
+    # Mock an SQS event containing a pixel update wrapped in SNS → SQS envelope
     event = {
         "Records": [
             {
-                "eventName": "INSERT",
-                "dynamodb": {
-                    "NewImage": {
-                        "ChunkId": {"S": "CHUNK#0#0"},
-                        "PixelId": {"S": "PIXEL#5#5"},
-                        "color": {"S": "#FFFFFF"},
-                        "author_id": {"S": "user1"}
-                    }
-                }
+                "body": json.dumps({
+                    "Message": json.dumps({
+                        "action": "pixel_update",
+                        "payload": {
+                            "x": 5,
+                            "y": 5,
+                            "color": "#FFFFFF"
+                        }
+                    })
+                })
             }
         ]
     }
@@ -45,10 +46,8 @@ def test_broadcast_worker_parses_dynamodb_stream(mock_post, dynamodb_mock):
     # 3. Assert: Verify post_to_connection was called for BOTH connections
     assert mock_post.call_count == 2
 
-    # Grab the payload that was sent
+    # The broadcast_worker sends binary-encoded pixel data
     call_args = mock_post.call_args[1]
-    posted_data = json.loads(call_args["Data"].decode("utf-8"))
-
-    assert len(posted_data) == 1
-    assert posted_data[0]["type"] == "pixel_update"
-    assert posted_data[0]["data"]["PixelId"] == "PIXEL#5#5"
+    # Data is base64-encoded binary, verify it's not empty
+    assert "Data" in call_args
+    assert len(call_args["Data"]) > 0

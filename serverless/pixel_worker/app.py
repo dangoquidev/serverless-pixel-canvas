@@ -1,14 +1,12 @@
 import os
 import json
-import time
-from datetime import datetime, timezone
+import re
 import boto3
 from boto3.session import Config
-from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from canvas_utils import build_pixel_item, CHUNK_SIZE, MAX_PIXELS_PER_MINUTE
+from canvas_utils import build_pixel_item
 
 logger = Logger()
 tracer = Tracer()
@@ -20,53 +18,32 @@ boto_config = Config(
 
 dynamodb = boto3.resource("dynamodb", config=boto_config)
 canvas_table = dynamodb.Table(os.environ.get("CANVAS_TABLE_NAME"))
-rate_limit_table = dynamodb.Table(os.environ.get("RATE_LIMIT_TABLE_NAME"))
 
 # --- Helper Functions ---
 
 
 def _parse_sqs_record(record: dict) -> dict:
-    """Unwraps the SQS → SNS envelope and returns the inner pixel payload."""
+    """Unwraps the SQS → SNS envelope and returns the full message."""
     sqs_body = json.loads(record.get("body", "{}"))
-    sns_message = json.loads(sqs_body.get("Message", "{}"))
-    return sns_message.get("payload", {})
+    return json.loads(sqs_body.get("Message", "{}"))
 
 
 def _is_valid_payload(payload: dict) -> bool:
-    """Returns True only if all required pixel fields are present."""
-    return bool(
-        payload.get("user_id")
-        and "x" in payload
-        and "y" in payload
-        and "color" in payload
-    )
+    """Returns True only if all required pixel fields are present and valid."""
+    if not (payload.get("user_id") and "x" in payload and "y" in payload and "color" in payload):
+        return False
+    
+    # Validate color is valid hex format (#RRGGBB)
+    color = payload.get("color")
+    if not re.match(r"^#[0-9A-Fa-f]{6}$", color):
+        logger.warning("Invalid color hex format", extra={"color": color})
+        return False
+    
+    return True
 
 
-@tracer.capture_method
-def check_rate_limit(user_id: str) -> bool:
-    """Uses a DynamoDB atomic counter to enforce a per-user, per-minute rate limit."""
-    current_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
-
-    try:
-        rate_limit_table.update_item(
-            Key={
-                "UserId": f"RATELIMIT#{user_id}",
-                "TimeWindow": f"WINDOW#{current_minute}",
-            },
-            UpdateExpression="ADD draw_count :inc SET ExpirationTime = :ttl",
-            ExpressionAttributeValues={
-                ":inc": 1,
-                ":ttl": int(time.time()) + 120,
-                ":limit": MAX_PIXELS_PER_MINUTE,
-            },
-            ConditionExpression="attribute_not_exists(draw_count) OR draw_count < :limit",
-            ReturnValues="UPDATED_NEW",
-        )
-        return True
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
-        raise
+# NOTE: Rate limiting moved to web_proxy (token bucket algorithm)
+# pixel_worker receives pre-validated pixels, no need to duplicate rate limiting here
 
 
 def save_pixel(x: int, y: int, color: str, user_id: str) -> None:
@@ -76,9 +53,52 @@ def save_pixel(x: int, y: int, color: str, user_id: str) -> None:
     canvas_table.put_item(Item=pixel_item)
 
 
+def clear_canvas() -> int:
+    """Deletes all pixels from the canvas table. Returns number of deleted items."""
+    deleted_count = 0
+    scan_params = {
+        "ProjectionExpression": "c, p",
+    }
+
+    response = canvas_table.scan(**scan_params)
+
+    while True:
+        items = response.get("Items", [])
+
+        if items:
+            with canvas_table.batch_writer() as batch:
+                for item in items:
+                    batch.delete_item(Key={"c": item["c"], "p": item["p"]})
+                    deleted_count += 1
+
+        if "LastEvaluatedKey" not in response:
+            break
+
+        response = canvas_table.scan(
+            **scan_params,
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+        )
+
+    return deleted_count
+
+
 def _process_record(record: dict, correlation_id: str) -> bool:
     """Processes a single SQS record. Returns True on success, False on skip."""
-    payload = _parse_sqs_record(record)
+    message = _parse_sqs_record(record)
+    action = message.get("action")
+
+    if action == "clean":
+        deleted_count = clear_canvas()
+        logger.info(
+            "Canvas cleaned",
+            extra={
+                "deleted_count": deleted_count,
+                "correlation_id": correlation_id,
+            },
+        )
+        return True
+
+    payload = message.get("payload", {})
 
     if not _is_valid_payload(payload):
         logger.warning(
@@ -92,12 +112,8 @@ def _process_record(record: dict, correlation_id: str) -> bool:
     y = int(payload["y"])
     color = payload["color"]
 
-    if not check_rate_limit(user_id):
-        logger.warning(
-            "Rate limit exceeded",
-            extra={"user_id": user_id, "correlation_id": correlation_id},
-        )
-        return False
+    # Rate limiting is handled by web_proxy (token bucket) before SNS publish
+    # pixel_worker receives pre-validated, rate-limited pixels only
 
     save_pixel(x, y, color, user_id)
 
@@ -119,7 +135,7 @@ def _process_record(record: dict, correlation_id: str) -> bool:
 
 @tracer.capture_lambda_handler
 @logger.inject_lambda_context
-def lambda_handler(event: dict, context: LambdaContext):
+def lambda_handler(event: dict, context: LambdaContext) -> dict:
     """Processes pixel draw events arriving via SQS from the SNS fanout."""
     records = event.get("Records", [])
     if not records:

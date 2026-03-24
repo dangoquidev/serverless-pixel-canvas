@@ -17,10 +17,23 @@ def test_snapshot_worker_creates_and_uploads_image(dynamodb_mock):
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="test-snapshots-bucket")
     
-    # Seed DynamoDB with some pixels
+    # Seed DynamoDB with some pixels using minified schema
     table = dynamodb_mock.Table(os.environ["CANVAS_TABLE_NAME"])
-    table.put_item(Item={"ChunkId": "CHUNK#0#0", "PixelId": "PIXEL#50#50", "color": "#FF0000"})
-    table.put_item(Item={"ChunkId": "CHUNK#0#0", "PixelId": "PIXEL#60#60", "color": "#00FF00"})
+    # Minified schema: c=ChunkId (cx#cy), p=pixel position, co=color (int), u=user_id, t=timestamp
+    table.put_item(Item={
+        "c": "0#0",  # ChunkId cx#cy
+        "p": 5050,   # Pixel position (cy * 100 + cx)
+        "co": 0xFF0000,  # Color as integer (red)
+        "u": "user1",
+        "t": 1234567890
+    })
+    table.put_item(Item={
+        "c": "0#0",
+        "p": 6060,   # Another pixel
+        "co": 0x00FF00,  # Color as integer (green)
+        "u": "user2",
+        "t": 1234567890
+    })
     
     # Mock Event (Usually invoked via EventBridge cron or manually)
     event = {

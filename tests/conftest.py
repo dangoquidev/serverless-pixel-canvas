@@ -1,9 +1,14 @@
 import os
+import sys
 import pytest
 import boto3
 from unittest.mock import MagicMock
 from moto import mock_aws
 from aws_lambda_powertools.utilities.typing import LambdaContext
+
+# Add layers to Python path for imports (simulates AWS Lambda layer behavior)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'layers', 'canvas_utils', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'serverless'))
 
 # Set dummy environment variables BEFORE importing your Lambda apps
 os.environ["AWS_ACCESS_KEY_ID"] = "testing"
@@ -15,6 +20,8 @@ os.environ["CANVAS_TABLE_NAME"] = "test-canvas-pixels"
 os.environ["RATE_LIMIT_TABLE_NAME"] = "test-rate-limits"
 os.environ["CONNECTIONS_TABLE_NAME"] = "test-websocket-connections"
 os.environ["AWS_XRAY_CONTEXT_MISSING"] = "LOG_ERROR"
+os.environ["SNS_TOPIC_ARN"] = "arn:aws:sns:us-east-1:123456789012:test-pixel-events-topic"
+os.environ["PIXEL_WORKER_QUEUE_URL"] = "https://sqs.us-east-1.amazonaws.com/123456789012/test-pixel-worker-queue"
 
 # START MOTO GLOBALLY so module-level boto3.client() calls map to Moto,
 # which fixes cold-start initialization testing issues.
@@ -42,12 +49,12 @@ def dynamodb_mock():
     dynamodb.create_table(
         TableName=os.environ["CANVAS_TABLE_NAME"],
         KeySchema=[
-            {"AttributeName": "ChunkId", "KeyType": "HASH"},
-            {"AttributeName": "PixelId", "KeyType": "RANGE"}
+            {"AttributeName": "c", "KeyType": "HASH"},
+            {"AttributeName": "p", "KeyType": "RANGE"}
         ],
         AttributeDefinitions=[
-            {"AttributeName": "ChunkId", "AttributeType": "S"},
-            {"AttributeName": "PixelId", "AttributeType": "S"}
+            {"AttributeName": "c", "AttributeType": "S"},
+            {"AttributeName": "p", "AttributeType": "N"}
         ],
         BillingMode="PAY_PER_REQUEST"
     )
@@ -71,9 +78,19 @@ def dynamodb_mock():
             {"AttributeName": "ConnectionId", "KeyType": "HASH"}
         ],
         AttributeDefinitions=[
-            {"AttributeName": "ConnectionId", "AttributeType": "S"}
+            {"AttributeName": "ConnectionId", "AttributeType": "S"},
+            {"AttributeName": "LiveStatus", "AttributeType": "S"}
         ],
-        BillingMode="PAY_PER_REQUEST"
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": "LiveStatusIndex",
+                "KeySchema": [{"AttributeName": "LiveStatus", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "KEYS_ONLY"},
+                "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+            }
+        ],
+        BillingMode="PROVISIONED",
+        ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
     )
 
     yield dynamodb

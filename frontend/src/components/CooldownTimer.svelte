@@ -1,9 +1,12 @@
 <script>
-  import { pixelsRemaining } from "../stores/canvasStore.js";
+  import {
+    pixelsRemaining,
+    MAX_PIXELS,
+    REFILL_SECONDS,
+    tickCooldown,
+    getSecondsUntilNextRefill,
+  } from "../stores/canvasStore.js";
   import { onMount } from "svelte";
-
-  const MAX_PIXELS = 20;
-  const REFILL_SECONDS = 3;
 
   let displayString = "READY";
   let isCooling = false;
@@ -11,26 +14,24 @@
 
   $: isCooling = $pixelsRemaining <= 0;
 
+  const refreshDisplay = () => {
+    secondsUntilNext = getSecondsUntilNextRefill();
+
+    if ($pixelsRemaining === MAX_PIXELS) {
+      displayString = `${MAX_PIXELS} PIXELS (MAX)`;
+    } else if ($pixelsRemaining > 0) {
+      displayString = `${$pixelsRemaining} LEFT (+1 in ${secondsUntilNext}s)`;
+    } else {
+      displayString = `WAIT: ${secondsUntilNext}s`;
+    }
+  };
+
+  $: refreshDisplay();
+
   onMount(() => {
     const interval = setInterval(() => {
-      if ($pixelsRemaining < MAX_PIXELS) {
-        secondsUntilNext -= 1;
-
-        if (secondsUntilNext <= 0) {
-          pixelsRemaining.update((n) => Math.min(MAX_PIXELS, n + 1));
-          secondsUntilNext = REFILL_SECONDS;
-        }
-      } else {
-        secondsUntilNext = REFILL_SECONDS;
-      }
-
-      if ($pixelsRemaining === MAX_PIXELS) {
-        displayString = `20 PIXELS (MAX)`;
-      } else if ($pixelsRemaining > 0) {
-        displayString = `${$pixelsRemaining} LEFT (+1 in ${secondsUntilNext}s)`;
-      } else {
-        displayString = `WAIT: ${secondsUntilNext}s`;
-      }
+      tickCooldown();
+      refreshDisplay();
     }, 1000);
 
     return () => clearInterval(interval);

@@ -4,6 +4,15 @@ Description: >
   Serverless Pixel Canvas (r/place clone)
   Complete event-driven architecture with WebSockets, Auth, and Discord integrations.
 
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: "'*'"
+    Description: >
+      CORS AllowOrigin header. For production, set to your frontend domain (e.g., 'https://example.com').
+      Multi-origin CORS requires additional setup (comma-separated domains via Lambda authorizer).
+      Default '*' should be restricted before production deployment.
+
 Globals:
   Function:
     Timeout: 10
@@ -121,18 +130,33 @@ Resources:
       AttributeDefinitions:
         - AttributeName: ConnectionId
           AttributeType: S
+        - AttributeName: ConnectionTimestamp
+          AttributeType: N
         - AttributeName: LiveStatus
           AttributeType: S
       KeySchema:
         - AttributeName: ConnectionId
           KeyType: HASH
       GlobalSecondaryIndexes:
+        - IndexName: ConnectionTimestampIndex
+          KeySchema:
+            - AttributeName: ConnectionTimestamp
+              KeyType: HASH
+            - AttributeName: ConnectionId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+          ContributorInsightsSpecification:
+            Enabled: false
         - IndexName: LiveStatusIndex
           KeySchema:
             - AttributeName: LiveStatus
               KeyType: HASH
           Projection:
             ProjectionType: KEYS_ONLY
+      TimeToLiveSpecification:
+        AttributeName: ExpirationTime
+        Enabled: true
 
   RateLimitsTable:
     Type: AWS::DynamoDB::Table
@@ -195,6 +219,7 @@ Resources:
       FilterPolicy:
         action:
           - "draw_pixel"
+          - "clean"
 
   # Snapshot Queue
   SnapshotWorkerQueue:
@@ -252,6 +277,12 @@ Resources:
         action:
           - "draw_pixel"
 
+  BatchBroadcastQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: batch-broadcast-worker-queue
+      VisibilityTimeout: 60  # Allow Lambda 60s to process batch
+
   # ==========================================
   # 4. REST API & CUSTOM AUTHORIZER
   # ==========================================
@@ -264,7 +295,7 @@ Resources:
       Cors:
         AllowMethods: "'GET,POST,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization'"
-        AllowOrigin: "'*'"
+        AllowOrigin: !Ref AllowedOrigin
         MaxAge: "'600'"
       Auth:
         DefaultAuthorizer: CanvasJwtAuthorizer
@@ -405,6 +436,38 @@ Resources:
     Properties:
       CodeUri: serverless/broadcast_worker/
       Handler: app.lambda_handler
+      Timeout: 30  # Longer timeout for large broadcasts
+      MemorySize: 512  # More memory for handling large broadcasts
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE_NAME: !Ref WebSocketConnectionsTable
+          WSS_API_ENDPOINT: !Sub "https://${PixelWebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production"
+          BATCH_BROADCAST_QUEUE_URL: !Ref BatchBroadcastQueue
+          BATCH_THRESHOLD: "5000"
+          BATCH_SIZE: "500"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebSocketConnectionsTable
+        - Statement:
+            - Effect: Allow
+              Action: [ "execute-api:ManageConnections" ]
+              Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PixelWebSocketApi}/production/*"
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt BatchBroadcastQueue.QueueName
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BroadcastWorkerQueue.Arn
+            BatchSize: 100
+            MaximumBatchingWindowInSeconds: 5
+
+  BatchBroadcastWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: serverless/broadcast_worker/
+      Handler: app.handle_batch_broadcast
+      Timeout: 60  # Full minute for batch processing
       MemorySize: 512
       Layers:
         - !Ref CanvasUtilsLayer
@@ -423,7 +486,7 @@ Resources:
         SQSEvent:
           Type: SQS
           Properties:
-            Queue: !GetAtt BroadcastWorkerQueue.Arn
+            Queue: !GetAtt BatchBroadcastQueue.Arn
             BatchSize: 30
             MaximumBatchingWindowInSeconds: 3
 
@@ -497,11 +560,14 @@ Resources:
         Variables:
           SNS_TOPIC_ARN: !Ref PixelEventsTopic
           DISCORD_SECRET_NAME: "DiscordSecrets"
+          APP_SECRET_NAME: "AppSecrets"
       Policies:
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt PixelEventsTopic.TopicName
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:AppSecrets-*"
       Events:
         DiscordInteractionsApi:
           Type: Api
@@ -525,47 +591,77 @@ Resources:
         Variables:
           CANVAS_TABLE_NAME: !Ref CanvasPixelsTableV2
           SNAPSHOT_BUCKET: !Ref SnapshotsBucket
+          SNAPSHOT_COMPLETE_TOPIC: !Ref SnapshotCompleteTopic
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref CanvasPixelsTableV2
         - S3WritePolicy:
             BucketName: !Ref SnapshotsBucket
+        - Statement:
+            - Effect: Allow
+              Action: [ "sns:Publish" ]
+              Resource: !Ref SnapshotCompleteTopic
       Events:
         SQSQueueEvent:
           Type: SQS
           Properties:
             Queue: !GetAtt SnapshotWorkerQueue.Arn
 
+  DiscordNotifierDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-discord-notifier-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+
   DiscordNotifierFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: serverless/discord_notifier/
       Handler: app.lambda_handler
+      Timeout: 60  # Longer timeout for retries
       Environment:
         Variables:
           DISCORD_SECRET_NAME: "DiscordSecrets"
+          DISCORD_NOTIFIER_DLQ_URL: !Ref DiscordNotifierDLQ
+          SNAPSHOT_BUCKET: !Ref SnapshotsBucket
       Policies:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
         - Statement:
             - Effect: Allow
               Action: "s3:GetObject"
-              Resource: !Sub "arn:aws:s3:::${AWS::StackName}-snapshots-${AWS::AccountId}/*"
+              Resource: !Sub "arn:aws:s3:::${SnapshotsBucket}/*"
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt DiscordNotifierDLQ.QueueName
       Events:
-        SnapshotCreatedEvent:
-          Type: S3
+        SnapshotCompleteEvent:
+          Type: SNS
           Properties:
-            Bucket: !Ref SnapshotsBucket
-            Events: s3:ObjectCreated:*
+            Topic: !Ref SnapshotCompleteTopic
 
   # ==========================================
-  # 7. OBSERVABILITY (Alarms)
+  # 7. OBSERVABILITY (Alarms & Topics)
   # ==========================================
+  
+  SnapshotCompleteTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-snapshot-complete"
+      DisplayName: "Snapshot Generation Complete Events"
+
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alarms"
+      DisplayName: "Pixel Canvas CloudWatch Alarms"
+
   SQSDlqAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: PixelWorker-DLQ-Alarm
+      AlarmName: !Sub "${AWS::StackName}-PixelWorker-DLQ-Alarm"
       AlarmDescription: "Alerts if pixel events fall into the Dead Letter Queue"
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -587,3 +683,9 @@ Outputs:
   WebSocketURL:
     Description: "WSS URL for real-time frontend connections"
     Value: !Sub "wss://${PixelWebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production"
+  AlarmTopicArn:
+    Description: "SNS Topic ARN for CloudWatch alarm notifications (subscribe for email alerts)"
+    Value: !Ref AlarmNotificationTopic
+  SnapshotCompleteTopicArn:
+    Description: "SNS Topic ARN for snapshot completion events (used by discord_notifier to avoid head_object calls)"
+    Value: !Ref SnapshotCompleteTopic
