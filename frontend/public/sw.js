@@ -8,12 +8,10 @@
  * - Precache API responses
  */
 
-const CACHE_NAME = 'pixel-canvas-v1';
+const CACHE_NAME = 'pixel-canvas-v2';
 const CACHE_URLS = [
   '/',
-  '/index.html',
-  '/app.css',
-  '/main.js'
+  '/index.html'
 ];
 
 // Install: Precache essential assets
@@ -60,6 +58,21 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // App shell documents: network first so new deploys are picked up quickly
+  if (request.mode === 'navigate' || request.destination === 'document') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request).then((cached) => cached || caches.match('/index.html')))
+    );
+    return;
+  }
+
   // API calls: Network first, fallback to cache
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
@@ -94,7 +107,16 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches
       .match(request)
-      .then((cached) => cached || fetch(request))
+      .then((cached) => {
+        if (cached) return cached;
+
+        return fetch(request).then((response) => {
+          if (response.ok) {
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+          }
+          return response;
+        });
+      })
       .catch(() => {
         // Fallback: serve offline page if available
         return caches.match('/index.html');
