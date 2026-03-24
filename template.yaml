@@ -219,6 +219,7 @@ Resources:
       FilterPolicy:
         action:
           - "draw_pixel"
+          - "clean"
 
   # Snapshot Queue
   SnapshotWorkerQueue:
@@ -459,6 +460,7 @@ Resources:
           Properties:
             Queue: !GetAtt BroadcastWorkerQueue.Arn
             BatchSize: 100
+            MaximumBatchingWindowInSeconds: 5
 
   BatchBroadcastWorkerFunction:
     Type: AWS::Serverless::Function
@@ -484,7 +486,7 @@ Resources:
         SQSEvent:
           Type: SQS
           Properties:
-            Queue: !GetAtt BroadcastWorkerQueue.Arn
+            Queue: !GetAtt BatchBroadcastQueue.Arn
             BatchSize: 30
             MaximumBatchingWindowInSeconds: 3
 
@@ -558,11 +560,14 @@ Resources:
         Variables:
           SNS_TOPIC_ARN: !Ref PixelEventsTopic
           DISCORD_SECRET_NAME: "DiscordSecrets"
+          APP_SECRET_NAME: "AppSecrets"
       Policies:
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt PixelEventsTopic.TopicName
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DiscordSecrets-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:AppSecrets-*"
       Events:
         DiscordInteractionsApi:
           Type: Api
