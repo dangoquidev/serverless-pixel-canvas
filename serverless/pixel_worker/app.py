@@ -1,15 +1,12 @@
 import os
 import json
-import time
 import re
-from datetime import datetime, timezone
 import boto3
 from boto3.session import Config
-from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from canvas_utils import build_pixel_item, CHUNK_SIZE, MAX_PIXELS_PER_MINUTE
+from canvas_utils import build_pixel_item
 
 logger = Logger()
 tracer = Tracer()
@@ -21,16 +18,14 @@ boto_config = Config(
 
 dynamodb = boto3.resource("dynamodb", config=boto_config)
 canvas_table = dynamodb.Table(os.environ.get("CANVAS_TABLE_NAME"))
-rate_limit_table = dynamodb.Table(os.environ.get("RATE_LIMIT_TABLE_NAME"))
 
 # --- Helper Functions ---
 
 
 def _parse_sqs_record(record: dict) -> dict:
-    """Unwraps the SQS → SNS envelope and returns the inner pixel payload."""
+    """Unwraps the SQS → SNS envelope and returns the full message."""
     sqs_body = json.loads(record.get("body", "{}"))
-    sns_message = json.loads(sqs_body.get("Message", "{}"))
-    return sns_message.get("payload", {})
+    return json.loads(sqs_body.get("Message", "{}"))
 
 
 def _is_valid_payload(payload: dict) -> bool:
@@ -58,9 +53,52 @@ def save_pixel(x: int, y: int, color: str, user_id: str) -> None:
     canvas_table.put_item(Item=pixel_item)
 
 
+def clear_canvas() -> int:
+    """Deletes all pixels from the canvas table. Returns number of deleted items."""
+    deleted_count = 0
+    scan_params = {
+        "ProjectionExpression": "c, p",
+    }
+
+    response = canvas_table.scan(**scan_params)
+
+    while True:
+        items = response.get("Items", [])
+
+        if items:
+            with canvas_table.batch_writer() as batch:
+                for item in items:
+                    batch.delete_item(Key={"c": item["c"], "p": item["p"]})
+                    deleted_count += 1
+
+        if "LastEvaluatedKey" not in response:
+            break
+
+        response = canvas_table.scan(
+            **scan_params,
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+        )
+
+    return deleted_count
+
+
 def _process_record(record: dict, correlation_id: str) -> bool:
     """Processes a single SQS record. Returns True on success, False on skip."""
-    payload = _parse_sqs_record(record)
+    message = _parse_sqs_record(record)
+    action = message.get("action")
+
+    if action == "clean":
+        deleted_count = clear_canvas()
+        logger.info(
+            "Canvas cleaned",
+            extra={
+                "deleted_count": deleted_count,
+                "correlation_id": correlation_id,
+            },
+        )
+        return True
+
+    payload = message.get("payload", {})
 
     if not _is_valid_payload(payload):
         logger.warning(
