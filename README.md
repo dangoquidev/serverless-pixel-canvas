@@ -92,3 +92,14 @@ aws s3 sync dist/ s3://your-bucket/
 ✅ **Robust Testing:** 68% code coverage with comprehensive unit & integration tests  
 
 
+
+---
+
+## 👥 Team
+
+Built in a team of two as part of the Epitech Cloud-Native module (2026):
+
+- **Alexandre Pereira de Almeida** ([@dangoquidev](https://github.com/dangoquidev))
+- **Raphaël Camblong** ([@raphaelCamblong](https://github.com/raphaelCamblong))
+
+Originally developed in a private Epitech organization repository; full commit history preserved here.
